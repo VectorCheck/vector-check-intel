@@ -54,6 +54,20 @@ def get_best_upper_wind(h_data, idx):
             return val_list[idx], height
     return None, None
 
+def estimate_tactical_visibility(temp, rh, weather_code):
+    """Multi-factor Visibility Estimation for Vector Check"""
+    if temp is None or rh is None: return 10.0
+    # 1. Base from Dewpoint Depression
+    dp_dep = (100 - rh) / 5
+    vis_est = max(0.1, dp_dep * 1.13)
+    # 2. Precipitation Extinction
+    if weather_code is not None:
+        if weather_code in [65, 66, 67, 95]: vis_est = min(vis_est, 1.5) # Heavy Rain/FZRA
+        elif weather_code in [73, 75, 85, 86]: vis_est = min(vis_est, 0.75) # Moderate/Heavy Snow
+        elif weather_code in [51, 61, 80, 71]: vis_est = min(vis_est, 4.0) # Light Precip
+        elif weather_code in [45, 48]: vis_est = min(vis_est, 0.25) # Fog
+    return min(10.0, vis_est)
+
 # 4. DATA FETCHING
 @st.cache_data(ttl=600)
 def fetch_mission_data(latitude, longitude, model_url):
@@ -140,26 +154,14 @@ if data and "hourly" in data:
     selected_time = st.sidebar.select_slider("Forecast Hour:", options=times)
     idx = times.index(selected_time)
     
-    # --- METRIC ROW CALCULATIONS ---
-    def get_precip_type(code):
-        # Filtering WMO 4677 to only show hydrometeors
-        precip_codes = {
-            51: "Drizzle", 53: "Drizzle", 55: "Drizzle",
-            56: "FZ Drizzle", 57: "FZ Drizzle",
-            61: "Rain", 63: "Rain", 65: "Rain",
-            66: "FZ Rain", 67: "FZ Rain",
-            71: "Snow", 73: "Snow", 75: "Snow", 77: "Snow Grains",
-            80: "Rain Showers", 81: "Rain Showers", 82: "Rain Showers",
-            85: "Snow Showers", 86: "Snow Showers",
-            95: "TS", 96: "TS + Hail", 99: "TS + Hail"
-        }
+    # --- METRIC CALCULATIONS ---
+    def get_precip_only(code):
+        precip_codes = {51: "Drizzle", 53: "Drizzle", 55: "Drizzle", 56: "FZ Drizzle", 57: "FZ Drizzle",
+                        61: "Rain", 63: "Rain", 65: "Rain", 66: "FZ Rain", 67: "FZ Rain",
+                        71: "Snow", 73: "Snow", 75: "Snow", 77: "Snow Grains",
+                        80: "Rain Showers", 81: "Rain Showers", 82: "Rain Showers",
+                        85: "Snow Showers", 86: "Snow Showers", 95: "TS", 96: "Mixed/Hail", 99: "Mixed/Hail"}
         return precip_codes.get(code, "None")
-
-    def estimate_cloud_base(t, rh):
-        if t is None or rh is None: return "N/A"
-        if rh < 55: return "Clear"
-        base_ft = (t - (t - ((100 - rh)/5))) * 122 * 3.28084
-        return f"{int(round(base_ft, -2))} ft"
 
     temp = h['temperature_2m'][idx]
     hum  = h['relative_humidity_2m'][idx]
@@ -167,14 +169,13 @@ if data and "hourly" in data:
     w_spd = h['wind_speed_10m'][idx]
     wx_code = h['weather_code'][idx]
     
-    # Standard 3-digit wind direction
+    # 3-Digit Wind Direction
     w_dir_display = str(int(w_dir_raw)).zfill(3) if w_dir_raw is not None else "N/A"
     
-    # Visibility in Statute Miles (SM)
-    vis_raw = h.get('visibility', [None]*len(h['time']))[idx]
-    vis_sm = (vis_raw * 0.000621371) if vis_raw is not None else None
+    # Tactical Visibility Estimate (SM)
+    vis_sm = estimate_tactical_visibility(temp, hum, wx_code)
     
-    # Freezing Altitude Logic (SFC priority)
+    # Freezing Altitude (SFC Logic)
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
     if temp is not None and temp <= 0:
         frz_display = "SFC"
@@ -184,15 +185,16 @@ if data and "hourly" in data:
     else:
         frz_display = "N/A"
     
-    c_base = estimate_cloud_base(temp, hum)
+    # Cloud Base Estimation (Standard Lapse)
+    c_base = "Clear" if hum < 55 else f"{int(round((temp - (temp - ((100 - hum)/5))) * 122 * 3.28084, -2))} ft"
 
-    # Render 8-Column Metric Row
+    # Render Metric Row
     cols = st.columns(8)
     cols[0].metric("Temp", f"{safe_val(temp, precision=1)}°C")
     cols[1].metric("RH", f"{safe_val(hum)}%")
     cols[2].metric("Wind Dir", f"{w_dir_display}°")
     cols[3].metric("Wind Spd", f"{safe_val(w_spd)} kt")
-    cols[4].metric("Precip", get_precip_type(wx_code))
+    cols[4].metric("Precip", get_precip_only(wx_code))
     cols[5].metric("Vis", f"{safe_val(vis_sm, precision=1)} sm")
     cols[6].metric("Freezing Alt", frz_display)
     cols[7].metric("Cloud", c_base)
@@ -215,7 +217,7 @@ if data and "hourly" in data:
             stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
         st.table(pd.DataFrame(stack))
     else:
-        st.warning("Upper-air data or surface wind data unavailable for this hour.")
+        st.warning("Upper-air data unavailable for this hour.")
 
     # --- SKEW-T ---
     st.divider()
