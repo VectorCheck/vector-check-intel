@@ -16,7 +16,7 @@ st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layou
 # CUSTOM CSS: STEALTH THEME
 st.markdown("""
     <style>
-    [data-testid="stMetricValue"] { font-size: 1.4rem !important; color: #E58E26 !important; }
+    [data-testid="stMetricValue"] { font-size: 1.2rem !important; color: #E58E26 !important; }
     [data-testid="stMetricLabel"] { font-size: 0.8rem !important; color: #8E949E !important; }
     table { margin-left: auto; margin-right: auto; text-align: center !important; width: 90%; border-collapse: collapse; background-color: #1B1E23; }
     th { text-align: center !important; color: #8E949E !important; font-weight: bold !important; padding: 10px !important; border-bottom: 2px solid #3E444E !important; text-transform: uppercase; }
@@ -78,7 +78,6 @@ def fetch_mission_data(latitude, longitude, model_url):
 
 @st.cache_data(ttl=300)
 def get_aviation_weather(station):
-    # Fixed headers for aviationweather.gov API V2
     headers = {'User-Agent': 'VectorCheck_Risk_Management_v1.0'}
     try:
         m_url = f"https://aviationweather.gov/api/data/metar?ids={station}"
@@ -90,8 +89,6 @@ def get_aviation_weather(station):
 
 def highlight_aviation_weather(text):
     if "Link Error" in text: return text
-
-    # 1. VISIBILITY: IFR < 3SM (Red), MVFR 3-5SM (Yellow)
     def vis_replacer(match):
         val_str = match.group(1)
         try:
@@ -100,8 +97,6 @@ def highlight_aviation_weather(text):
             if val <= 5: return f'<span style="color: #f6ec15; font-weight: bold;">{match.group(0)}</span>'
         except: pass
         return match.group(0)
-
-    # 2. CEILINGS: IFR < 1000ft (Red), MVFR 1000-3000ft (Yellow)
     def cloud_replacer(match):
         try:
             height = int(match.group(2)) * 100
@@ -109,8 +104,6 @@ def highlight_aviation_weather(text):
             if height <= 3000: return f'<span style="color: #f6ec15; font-weight: bold;">{match.group(0)}</span>'
         except: pass
         return match.group(0)
-
-    # 3. WEATHER PHENOMENA: Freezing/Heavy (Red), Fog/Mist (Yellow)
     def wx_replacer(match):
         code = match.group(0)
         if any(x in code for x in ['FZ', 'PL', 'IC', '+']):
@@ -119,17 +112,14 @@ def highlight_aviation_weather(text):
             return f'<span style="color: #f6ec15; font-weight: bold;">{code}</span>'
         return code
 
-    # Apply highlighting regex
     text = re.sub(r'(\d+/\d+|\d+)SM', vis_replacer, text)
     text = re.sub(r'(BKN|OVC|VV)(\d{3})', cloud_replacer, text)
     text = re.sub(r'\b(?:\+|-|VC)?(?:FZ|PL|IC|FG|BR|RA|SN|DZ|GR|GS|UP)+\b', wx_replacer, text)
-    
     return text
 
 # 5. MAIN RENDER
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar_raw, taf_raw = get_aviation_weather(icao)
-
 metar_h = highlight_aviation_weather(metar_raw)
 taf_h = highlight_aviation_weather(taf_raw).replace('TAF ', 'TAF<br>').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')
 
@@ -150,36 +140,55 @@ if data and "hourly" in data:
     selected_time = st.sidebar.select_slider("Forecast Hour:", options=times)
     idx = times.index(selected_time)
     
-    # Core Metrics
-    w10 = h['wind_speed_10m'][idx]
-    gst = h['wind_gusts_10m'][idx]
-    
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("WIND (10m)", f"{safe_val(w10)} kt")
-    m2.metric("GUSTS", f"{safe_val(gst)} kt")
-    m3.metric("FREEZING LVL", f"{safe_val(h['freezing_level_height'][idx], 3.28084)} ft")
-    m4.metric("VISIBILITY", f"{safe_val(h['visibility'][idx], 0.001, precision=1)} km")
+    # --- METRIC ROW CALCULATIONS ---
+    def get_wx_desc(code):
+        codes = {0: "Clear", 1: "Mainly Clear", 2: "Partly Cloudy", 3: "Overcast", 45: "Fog", 48: "Dep Fog", 51: "Drizzle", 56: "FZ Drizzle", 61: "Rain", 66: "FZ Rain", 71: "Snow", 77: "Snow Grains", 80: "Showers", 85: "Snow Showers", 95: "TS"}
+        return codes.get(code, "Clear")
+
+    def estimate_cloud_base(t, rh):
+        if rh < 55: return "Clear"
+        base_ft = (t - (t - ((100 - rh)/5))) * 122 * 3.28084
+        return f"{int(round(base_ft, -2))} ft"
+
+    temp = h['temperature_2m'][idx]
+    hum  = h['relative_humidity_2m'][idx]
+    w_dir = h['wind_direction_10m'][idx]
+    w_spd = h['wind_speed_10m'][idx]
+    wx_code = h['weather_code'][idx]
+    vis = h['visibility'][idx] * 0.001
+    frz = h['freezing_level_height'][idx] * 3.28084
+    c_base = estimate_cloud_base(temp, hum)
+
+    # Render 8-Column Metric Row
+    cols = st.columns(8)
+    cols[0].metric("TEMP", f"{safe_val(temp, precision=1)}°C")
+    cols[1].metric("RH", f"{safe_val(hum)}%")
+    cols[2].metric("WIND DIR", f"{int(w_dir)}°")
+    cols[3].metric("WIND SPD", f"{int(w_spd)} kt")
+    cols[4].metric("PRECIP", get_wx_desc(wx_code))
+    cols[5].metric("VIS", f"{safe_val(vis, precision=1)} km")
+    cols[6].metric("FRZ LVL", f"{safe_val(frz)} ft")
+    cols[7].metric("CLOUD", c_base)
 
     # --- HAZARD STACK ---
     st.subheader("Tactical Hazard Stack (Estimated AGL Winds)")
+    gst = h['wind_gusts_10m'][idx]
     upper_v, upper_h = get_best_upper_wind(h, idx)
     
-    if w10 is not None and upper_v is not None:
+    if w_spd is not None and upper_v is not None:
         stack = []
-        gst_factor = gst / max(w10, 1)
+        gst_factor = gst / max(w_spd, 1)
         for alt in [400, 300, 200, 100]:
             alt_m = alt * 0.3048
-            spd = w10 + (upper_v - w10) * (math.log(alt_m/10) / math.log(upper_h/10))
+            spd = w_spd + (upper_v - w_spd) * (math.log(alt_m/10) / math.log(upper_h/10))
             cur_gst = spd * gst_factor
-            
             status = "NOMINAL"
             if cur_gst > 25: status = "NO-GO (GUST)"
             elif spd > 20: status = "CAUTION (WIND)"
-            
             stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
         st.table(pd.DataFrame(stack))
     else:
-        st.warning(f"Note: {model_choice} upper-air data is unavailable at this specific coordinate.")
+        st.warning("Upper-air data unavailable for this coordinate.")
 
     # --- SKEW-T ---
     st.divider()
