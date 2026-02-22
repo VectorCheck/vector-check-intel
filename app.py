@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 # 1. PAGE CONFIG
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
 
-# CUSTOM CSS: STEALTH THEME
+# CUSTOM CSS: STEALTH THEME + DYNAMIC HIGHLIGHTS
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.2rem !important; color: #E58E26 !important; }
@@ -43,7 +43,9 @@ model_api_map = {
 # 3. HELPERS
 def apply_tactical_highlights(text):
     if not text: return ""
+    # Freezing Precipitation
     text = re.sub(r'\b(FZRA|FZDZ|PL|FZFG)\b', r'<span class="fz-warn">\1</span>', text)
+    # Visibility
     def vis_match(m):
         try:
             s = m.group(0).replace('SM', '').strip()
@@ -53,6 +55,7 @@ def apply_tactical_highlights(text):
         except: pass
         return m.group(0)
     text = re.sub(r'\b(?:\d+\s+)?(?:\d+/\d+|\d+)SM\b', vis_match, text)
+    # Ceiling
     def sky_match(m):
         try:
             h = int(m.group(2)) * 100
@@ -64,7 +67,7 @@ def apply_tactical_highlights(text):
     return text
 
 def get_precip_type(code):
-    if code is None: return "N/A"
+    if code is None: return "None"
     if code in [0, 1, 2, 3, 45, 48]: return "None"
     if code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95]: return "Rain"
     if code in [56, 57, 66, 67]: return "Freezing Rain"
@@ -88,28 +91,34 @@ def get_aviation_weather(station):
 @st.cache_data(ttl=600)
 def fetch_mission_data(lat, lon, model_url):
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
-    # Standard variables
     hourly = ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_direction_10m", "weather_code", "freezing_level_height"]
-    # Model-specific logic for Hazard Stack
     if "gem" in model_url:
         hourly += ["wind_gusts_10m", "wind_speed_80m", "wind_speed_120m"]
-    else: # ECMWF
-        hourly += ["wind_speed_100m"] # Gusts not supported in open ECMWF hourly
-    
+    else:
+        hourly += ["wind_speed_100m"]
     hourly += [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels]
-    
     params = {"latitude": lat, "longitude": lon, "hourly": hourly, "wind_speed_unit": "kn", "forecast_hours": 48, "timezone": "UTC"}
     res = requests.get(model_url, params=params)
     return res.json() if res.status_code == 200 else None
 
 # 5. RENDER
 st.title("Atmospheric Risk Management")
-st.caption("Vector Check Aerial Group Inc.")
+st.caption("Vector Check Aerial Group Inc. | Tactical Operations Dashboard")
 
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar_raw, taf_raw = get_aviation_weather(icao)
 
-st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
+st.markdown(f"""
+    <div style="background-color: #1B1E23; padding: 15px; border: 1px solid #2D3139; border-radius: 5px; color: #D1D5DB;">
+        <div class="obs-text">
+            <strong style="color: #8E949E; text-transform: uppercase;">METAR/SPECI</strong><br>
+            {metar_raw}<br><br>
+            <strong style="color: #8E949E; text-transform: uppercase;">TAF</strong><br>
+            {taf_raw}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 st.divider()
 
 if data and "hourly" in data:
@@ -123,14 +132,21 @@ if data and "hourly" in data:
     frz_display = "SFC" if t <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
 
     c = st.columns(8)
-    c[0].metric("Temp", f"{t}°C"); c[1].metric("RH", f"{rh}%"); c[2].metric("Wind Dir", f"{int(h['wind_direction_10m'][idx]):03d}°")
-    c[3].metric("Wind Spd", f"{int(w_spd)} kt"); c[4].metric("Precip Type", get_precip_type(wx))
-    c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm"); c[6].metric("Freezing LVL", frz_display)
+    c[0].metric("Temp", f"{t}°C")
+    c[1].metric("RH", f"{rh}%")
+    c[2].metric("Wind Dir", f"{int(h['wind_direction_10m'][idx]):03d}°")
+    c[3].metric("Wind Spd", f"{int(w_spd)} kt")
+    c[4].metric("Precip Type", get_precip_type(wx))
+    c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm")
+    c[6].metric("Freezing LVL", frz_display)
     c[7].metric("Cloud Base", f"{int((t - (t - ((100-rh)/5)))*400)} ft")
 
     st.subheader("Tactical Hazard Stack")
-    # Handling ECMWF missing Gust/Upper Wind
-    gst = h.get('wind_gusts_10m', [w_spd * 1.3]*len(h['time']))[idx] # Fallback to 1.3x wind if gust missing
+    
+    # Backend Safety Logic (Synthetic Gust)
+    raw_gust = h.get('wind_gusts_10m', [w_spd]*len(h['time']))[idx]
+    gst = (w_spd * 1.25) if raw_gust <= w_spd else raw_gust
+
     upper_v = h.get('wind_speed_120m', h.get('wind_speed_100m', [w_spd*1.5]*len(h['time'])))[idx]
     upper_h = 120 if h.get('wind_speed_120m') else 100
 
@@ -140,7 +156,17 @@ if data and "hourly" in data:
         cur_gst = spd * (gst / max(w_spd, 1))
         status = "NO-GO (GUST)" if cur_gst > 25 else ("CAUTION (WIND)" if spd > 20 else "NOMINAL")
         stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
-    st.table(pd.DataFrame(stack))
     
-    if "ECMWF" in model_choice:
-        st.caption("⚠️ NOTE: ECMWF does not provide gust data. Gusts are estimated based on a standard 1.3x factor.")
+    st.table(pd.DataFrame(stack))
+
+    st.divider()
+    p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
+    t_plot = [h.get(f'temperature_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs]
+    td_plot = [h.get(f'dewpoint_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs]
+    
+    if all(v is not None for v in t_plot):
+        fig = plt.figure(figsize=(6, 8)); fig.patch.set_facecolor('#0E1117')
+        skew = SkewT(fig, rotation=45); skew.ax.set_facecolor('#1B1E23')
+        skew.plot(p_levs, np.array(t_plot) * units.degC, 'r', linewidth=2)
+        skew.plot(p_levs, np.array(td_plot) * units.degC, 'g', linewidth=2)
+        st.pyplot(fig)
