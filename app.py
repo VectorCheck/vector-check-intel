@@ -184,4 +184,4 @@ if data and "hourly" in data:
     plt.legend(loc='upper right', prop={'size': 12})
     
     buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', dpi=130)
-    st.image(buf, use_container_width=True)Vec
+    st.image(buf, use_container_width=True)
