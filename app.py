@@ -10,7 +10,7 @@ import math
 from datetime import datetime
 
 # 1. PAGE CONFIG
-st.set_page_config(page_title="Vector Check: Mission Intel", layout="wide")
+st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
 
 # CUSTOM CSS: STEALTH THEME
 st.markdown("""
@@ -23,8 +23,8 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("Vector Check: High-Res Airspace Intelligence")
-st.caption("TACTICAL PLANNING: HRDPS (2.5km) & ECMWF (9km) INTEGRATED")
+st.title("Actuals")
+st.caption("")
 
 # 2. SIDEBAR
 st.sidebar.header("Mission Parameters")
