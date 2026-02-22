@@ -25,17 +25,15 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. SIDEBAR & LOGO
+# 2. SIDEBAR & LOGO (Fixed Indentation)
 LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
 
 try:
-    # Everything below 'try' must be indented by 4 spaces
     st.sidebar.image(LOGO_URL, use_container_width=True)
 except Exception:
-    # If the URL fails, it falls back to text branding
     st.sidebar.title("Vector Check")
     st.sidebar.caption("Aerial Group Inc.")
-    
+
 st.sidebar.header("Mission Parameters")
 lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f")
@@ -63,7 +61,6 @@ def get_best_upper_wind(h_data, idx):
     return None, None
 
 def estimate_tactical_visibility(temp, rh, weather_code):
-    """Multi-factor Visibility Estimation for Vector Check"""
     if temp is None or rh is None: return 10.0
     dp_dep = (100 - rh) / 5
     vis_est = max(0.1, dp_dep * 1.13)
@@ -74,7 +71,7 @@ def estimate_tactical_visibility(temp, rh, weather_code):
         elif weather_code in [45, 48]: vis_est = min(vis_est, 0.25)
     return min(10.0, vis_est)
 
-# 4. DATA FETCHING
+# 4. DATA FETCHING (Improved METAR/TAF Logic)
 @st.cache_data(ttl=600)
 def fetch_mission_data(latitude, longitude, model_url):
     hourly_params = [
@@ -84,12 +81,7 @@ def fetch_mission_data(latitude, longitude, model_url):
     ]
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     hourly_params += [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels]
-
-    params = {
-        "latitude": latitude, "longitude": longitude,
-        "hourly": hourly_params,
-        "wind_speed_unit": "kn", "forecast_days": 2, "timezone": "UTC"
-    }
+    params = {"latitude": latitude, "longitude": longitude, "hourly": hourly_params, "wind_speed_unit": "kn", "forecast_days": 2, "timezone": "UTC"}
     try:
         res = requests.get(model_url, params=params, timeout=15)
         res.raise_for_status()
@@ -98,17 +90,22 @@ def fetch_mission_data(latitude, longitude, model_url):
 
 @st.cache_data(ttl=300)
 def get_aviation_weather(station):
-    headers = {'User-Agent': 'VectorCheck_Risk_Management_v1.0'}
+    # Minimal change: Browser-like headers to prevent API blocking
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
         m_url = f"https://aviationweather.gov/api/data/metar?ids={station}"
         t_url = f"https://aviationweather.gov/api/data/taf?ids={station}"
         m_res = requests.get(m_url, headers=headers, timeout=10)
         t_res = requests.get(t_url, headers=headers, timeout=10)
-        return m_res.text.strip() or "No METAR", t_res.text.strip() or "No TAF"
-    except: return "Link Error", "Link Error"
+        # Check if response is empty or 404
+        metar = m_res.text.strip() if m_res.status_code == 200 else f"Error {m_res.status_code}"
+        taf = t_res.text.strip() if t_res.status_code == 200 else f"Error {t_res.status_code}"
+        return metar or "No METAR", taf or "No TAF"
+    except Exception as e:
+        return f"Conn Error", f"Conn Error"
 
 def highlight_aviation_weather(text):
-    if "Link Error" in text: return text
+    if "Error" in text: return f"<span style='color: #ff4b4b;'>{text} - Check Station ID</span>"
     def vis_replacer(match):
         val_str = match.group(1)
         try:
@@ -126,12 +123,9 @@ def highlight_aviation_weather(text):
         return match.group(0)
     def wx_replacer(match):
         code = match.group(0)
-        if any(x in code for x in ['FZ', 'PL', 'IC', '+']):
-            return f'<span style="color: #ff4b4b; font-weight: bold;">{code}</span>'
-        if any(x in code for x in ['FG', 'BR']):
-            return f'<span style="color: #f6ec15; font-weight: bold;">{code}</span>'
+        if any(x in code for x in ['FZ', 'PL', 'IC', '+']): return f'<span style="color: #ff4b4b; font-weight: bold;">{code}</span>'
+        if any(x in code for x in ['FG', 'BR']): return f'<span style="color: #f6ec15; font-weight: bold;">{code}</span>'
         return code
-
     text = re.sub(r'(\d+/\d+|\d+)SM', vis_replacer, text)
     text = re.sub(r'(BKN|OVC|VV)(\d{3})', cloud_replacer, text)
     text = re.sub(r'\b(?:\+|-|VC)?(?:FZ|PL|IC|FG|BR|RA|SN|DZ|GR|GS|UP)+\b', wx_replacer, text)
@@ -181,13 +175,11 @@ if data and "hourly" in data:
     vis_sm = estimate_tactical_visibility(temp, hum, wx_code)
     
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
-    if temp is not None and temp <= 0:
-        frz_display = "SFC"
+    if temp is not None and temp <= 0: frz_display = "SFC"
     elif frz_raw is not None:
         frz_ft = frz_raw * 3.28084
         frz_display = "SFC" if frz_ft < 50 else f"{int(round(frz_ft, -2)):,} ft"
-    else:
-        frz_display = "N/A"
+    else: frz_display = "N/A"
     
     c_base = "Clear" if hum < 55 else f"{int(round((temp - (temp - ((100 - hum)/5))) * 122 * 3.28084, -2))} ft"
 
@@ -204,7 +196,6 @@ if data and "hourly" in data:
     st.subheader("Tactical Hazard Stack")
     gst = h['wind_gusts_10m'][idx]
     upper_v, upper_h = get_best_upper_wind(h, idx)
-    
     if w_spd is not None and upper_v is not None and gst is not None:
         stack = []
         gst_factor = gst / max(w_spd, 1)
@@ -217,14 +208,12 @@ if data and "hourly" in data:
             elif spd > 20: status = "CAUTION (WIND)"
             stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
         st.table(pd.DataFrame(stack))
-    else:
-        st.warning("Upper-air data unavailable for this hour.")
+    else: st.warning("Upper-air data unavailable.")
 
     st.divider()
     p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     t_plot = [h.get(f'temperature_{p}hPa')[idx] for p in p_levs]
     td_plot = [h.get(f'dewpoint_{p}hPa')[idx] for p in p_levs]
-
     if None not in t_plot:
         fig = plt.figure(figsize=(6, 8))
         fig.patch.set_facecolor('#0E1117')
