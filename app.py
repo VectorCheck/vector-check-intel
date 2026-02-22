@@ -8,7 +8,7 @@ from metpy.units import units
 import io
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from PIL import Image
 
 # 1. PAGE CONFIG
@@ -71,7 +71,7 @@ def estimate_tactical_visibility(temp, rh, weather_code):
         elif weather_code in [45, 48]: vis_est = min(vis_est, 0.25)
     return min(10.0, vis_est)
 
-# 4. DATA FETCHING (Time-Aware Caching)
+# 4. DATA FETCHING (48-Hour Tactical Window)
 @st.cache_data(ttl=600)
 def fetch_mission_data(latitude, longitude, model_url, time_key):
     hourly_params = [
@@ -81,7 +81,17 @@ def fetch_mission_data(latitude, longitude, model_url, time_key):
     ]
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     hourly_params += [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels]
-    params = {"latitude": latitude, "longitude": longitude, "hourly": hourly_params, "wind_speed_unit": "kn", "forecast_days": 2, "timezone": "UTC"}
+    
+    # NEW: forecast_hours=48 and past_hours=0 starts exactly AT THE CURRENT HOUR
+    params = {
+        "latitude": latitude, 
+        "longitude": longitude, 
+        "hourly": hourly_params, 
+        "wind_speed_unit": "kn", 
+        "forecast_hours": 48, 
+        "past_hours": 0, 
+        "timezone": "UTC"
+    }
     try:
         res = requests.get(model_url, params=params, timeout=15)
         res.raise_for_status()
@@ -133,7 +143,7 @@ def highlight_aviation_weather(text):
 st.title("Atmospheric Risk Management")
 st.caption("Vector Check Aerial Group Inc. | Specialized Drone Operations & Weather Consulting")
 
-# Generate time-based key for hourly caching
+# Time-based key for hourly caching
 current_hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
 data = fetch_mission_data(lat, lon, model_api_map[model_choice], current_hour_key)
 
@@ -154,16 +164,11 @@ st.divider()
 
 if data and "hourly" in data:
     h = data["hourly"]
+    # Timestamps now strictly start from the current hour
     times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in h["time"]]
     
-    # Logic to find index of CURRENT UTC hour
-    now_str = datetime.now(timezone.utc).strftime("%d %b %H:00 Z")
-    try:
-        current_idx = times.index(now_str)
-    except:
-        current_idx = 0
-
-    selected_time = st.sidebar.select_slider("Forecast Hour:", options=times, value=times[current_idx])
+    # Slider default is now always the first element (the current hour)
+    selected_time = st.sidebar.select_slider("Forecast Hour:", options=times, value=times[0])
     idx = times.index(selected_time)
     
     def get_precip_only(code):
