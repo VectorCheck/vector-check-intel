@@ -40,7 +40,20 @@ model_api_map = {
     "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/ecmwf"
 }
 
-# 3. DATA FETCHING
+# 3. ROBUST HELPERS
+def safe_val(val, multiplier=1, default="N/A", precision=0):
+    if val is None: return default
+    res = val * multiplier
+    return f"{res:,.{precision}f}" if precision > 0 else f"{int(round(res)):,}"
+
+def get_best_upper_wind(h_data, idx):
+    for key, height in [('wind_speed_120m', 120), ('wind_speed_100m', 100), ('wind_speed_80m', 80)]:
+        val_list = h_data.get(key)
+        if val_list and val_list[idx] is not None:
+            return val_list[idx], height
+    return None, None
+
+# 4. DATA FETCHING
 @st.cache_data(ttl=600)
 def fetch_mission_data(latitude, longitude, model_url):
     hourly_params = [
@@ -70,18 +83,6 @@ def get_aviation_weather(station):
         return m or "No METAR", t or "No TAF"
     except: return "Link Error", "Link Error"
 
-# 4. ROBUST HELPERS
-def safe_val(val, multiplier=1, default="N/A"):
-    return f"{int(round(val * multiplier)):,}" if val is not None else default
-
-def get_best_upper_wind(h_data, idx):
-    # HRDPS provides 80/120. ECMWF usually provides 100.
-    for key, height in [('wind_speed_120m', 120), ('wind_speed_100m', 100), ('wind_speed_80m', 80)]:
-        val_list = h_data.get(key)
-        if val_list and val_list[idx] is not None:
-            return val_list[idx], height
-    return None, None
-
 # 5. MAIN RENDER
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar, taf = get_aviation_weather(icao)
@@ -105,7 +106,8 @@ if data and "hourly" in data:
     m1.metric("WIND (10m)", f"{safe_val(w10)} kt")
     m2.metric("GUSTS", f"{safe_val(gst)} kt")
     m3.metric("FREEZING LVL", f"{safe_val(h['freezing_level_height'][idx], 3.28084)} ft")
-    m4.metric("VISIBILITY", f"{safe_val(h['visibility'][idx], 0.000539957, precision=1)} nm")
+    # VISIBILITY IN KM: Multiply meters by 0.001
+    m4.metric("VISIBILITY", f"{safe_val(h['visibility'][idx], 0.001, precision=1)} km")
 
     # --- HAZARD STACK ---
     st.subheader("📊 Tactical Hazard Stack (Estimated AGL Winds)")
@@ -115,7 +117,6 @@ if data and "hourly" in data:
         stack = []
         gst_factor = gst / max(w10, 1)
         for alt in [400, 300, 200, 100]:
-            # Logarithmic profile interpolation
             alt_m = alt * 0.3048
             spd = w10 + (upper_v - w10) * (math.log(alt_m/10) / math.log(upper_h/10))
             cur_gst = spd * gst_factor
@@ -127,11 +128,10 @@ if data and "hourly" in data:
             stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
         st.table(pd.DataFrame(stack))
     else:
-        st.warning(f"Note: {model_choice} does not provide enough upper-level wind data for a 400ft stack here.")
+        st.warning(f"Note: {model_choice} upper-air data is unavailable at this specific coordinate.")
 
     # --- SKEW-T ---
     st.divider()
-    st.subheader("🌡️ Thermodynamic Sounding")
     p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     t_plot = [h.get(f'temperature_{p}hPa')[idx] for p in p_levs]
     td_plot = [h.get(f'dewpoint_{p}hPa')[idx] for p in p_levs]
