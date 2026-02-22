@@ -37,7 +37,7 @@ except Exception:
 st.sidebar.header("Mission Parameters")
 lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f")
-icao = st.sidebar.text_input("Nearest ICAO", value="CYTR").upper()
+icao = st.sidebar.text_input("Nearest ICAO", value="CYTR").upper().strip()
 
 model_choice = st.sidebar.selectbox("Select Forecast Model:", 
     options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
@@ -71,7 +71,7 @@ def estimate_tactical_visibility(temp, rh, weather_code):
         elif weather_code in [45, 48]: vis_est = min(vis_est, 0.25)
     return min(10.0, vis_est)
 
-# 4. DATA FETCHING (Multi-Report Logic)
+# 4. DATA FETCHING (Enhanced Multi-Report & 48H Window)
 @st.cache_data(ttl=600)
 def fetch_mission_data(latitude, longitude, model_url, time_key):
     hourly_params = [
@@ -94,32 +94,36 @@ def fetch_mission_data(latitude, longitude, model_url, time_key):
 
 @st.cache_data(ttl=300)
 def get_aviation_weather(station):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    station = station.strip().upper()
+    # Mimic a real browser to bypass "Connection Errors"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/plain, text/html'
+    }
     try:
-        # Requesting the last 3 reports to capture SPECIs
+        session = requests.Session()
+        # hours=3 captures the current hour plus previous SPECIs
         m_url = f"https://aviationweather.gov/api/data/metar?ids={station}&hours=3"
         t_url = f"https://aviationweather.gov/api/data/taf?ids={station}"
         
-        m_res = requests.get(m_url, headers=headers, timeout=10)
-        t_res = requests.get(t_url, headers=headers, timeout=10)
+        m_res = session.get(m_url, headers=headers, timeout=12)
+        t_res = session.get(t_url, headers=headers, timeout=12)
         
-        # Process METAR/SPECI list
         metars = m_res.text.strip().split('\n')
-        # Filter out empty strings and take only the top 3
         metars = [m for m in metars if m][:3]
-        
         final_metar = "<br>".join(metars) if metars else "STATION INACTIVE / NO DATA"
+        
         taf = t_res.text.strip() if t_res.status_code == 200 and t_res.text.strip() else "NO ACTIVE TAF"
         
         return final_metar, taf
-    except Exception:
-        return "CONNECTION ERROR", "CONNECTION ERROR"
+    except Exception as e:
+        return f"DATA LINK ERROR: {str(e)[:15]}", "DATA LINK ERROR"
 
 def highlight_aviation_weather(text):
-    if "INACTIVE" in text or "CONNECTION" in text: 
+    if "ERROR" in text or "INACTIVE" in text: 
         return f"<span style='color: #A0A4AB; font-style: italic;'>{text}</span>"
     
-    # Highlight logic for SPECI and METAR markers
+    # Label styling
     text = text.replace("SPECI", '<span style="color: #E58E26; font-weight: bold;">SPECI</span>')
     text = text.replace("METAR", '<span style="color: #8E949E; font-weight: bold;">METAR</span>')
 
@@ -155,6 +159,7 @@ def highlight_aviation_weather(text):
 st.title("Atmospheric Risk Management")
 st.caption("Vector Check Aerial Group Inc. | Specialized Drone Operations & Weather Consulting")
 
+# Force hourly update
 current_hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
 data = fetch_mission_data(lat, lon, model_api_map[model_choice], current_hour_key)
 
@@ -162,11 +167,12 @@ metar_raw, taf_raw = get_aviation_weather(icao)
 metar_h = highlight_aviation_weather(metar_raw)
 taf_h = highlight_aviation_weather(taf_raw).replace('TAF ', 'TAF<br>').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')
 
+# Observation Display Box
 st.markdown(f"""
-    <div style="background-color: #1B1E23; padding: 15px; border: 1px solid #2D3139; border-radius: 5px; font-family: sans-serif; color: #D1D5DB; font-size: 0.85rem; line-height: 1.5;">
-        <strong style="color: #8E949E; text-transform: uppercase;">Observations (Last 3)</strong><br>
+    <div style="background-color: #1B1E23; padding: 15px; border: 1px solid #2D3139; border-radius: 5px; font-family: monospace; color: #D1D5DB; font-size: 0.85rem; line-height: 1.5;">
+        <strong style="color: #8E949E; text-transform: uppercase; font-family: sans-serif;">Observations (Last 3)</strong><br>
         {metar_h}<br><br>
-        <strong style="color: #8E949E; text-transform: uppercase;">TAF</strong><br>
+        <strong style="color: #8E949E; text-transform: uppercase; font-family: sans-serif;">TAF</strong><br>
         {taf_h}
     </div>
     """, unsafe_allow_html=True)
@@ -176,6 +182,7 @@ st.divider()
 if data and "hourly" in data:
     h = data["hourly"]
     times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in h["time"]]
+    # Default to "Now" (the first index of our 48h sliding window)
     selected_time = st.sidebar.select_slider("Forecast Hour:", options=times, value=times[0])
     idx = times.index(selected_time)
     
@@ -203,6 +210,7 @@ if data and "hourly" in data:
         frz_display = "SFC" if frz_ft < 50 else f"{int(round(frz_ft, -2)):,} ft"
     else: frz_display = "N/A"
     
+    # LCL approximation for cloud base
     c_base = "Clear" if hum < 55 else f"{int(round((temp - (temp - ((100 - hum)/5))) * 122 * 3.28084, -2))} ft"
 
     cols = st.columns(8)
@@ -230,7 +238,7 @@ if data and "hourly" in data:
             elif spd > 20: status = "CAUTION (WIND)"
             stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
         st.table(pd.DataFrame(stack))
-    else: st.warning("Upper-air data unavailable.")
+    else: st.warning("Upper-air data unavailable for this selection.")
 
     st.divider()
     p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
