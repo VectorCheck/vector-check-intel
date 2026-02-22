@@ -27,8 +27,7 @@ st.markdown("""
 
 # 2. SIDEBAR & LOGO
 try:
-    logo_URL = https://github.com/VectorCheck/vector-check-intel/blob/main/VCAG%20Inc%20-%20Logo%20Final.png
-    st.sidebar.image(logo, use_container_width=True)
+LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"    st.sidebar.image(logo, use_container_width=True)
 except FileNotFoundError:
     st.sidebar.warning("Logo file not found. Place 'VCAG Inc - Logo Final.jpg' in the script directory.")
 
