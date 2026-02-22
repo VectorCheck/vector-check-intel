@@ -1,0 +1,187 @@
+import streamlit as st
+import requests
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from metpy.plots import SkewT
+from metpy.units import units
+import io
+from datetime import datetime
+
+# 1. PAGE CONFIG & UI LOCK
+st.set_page_config(page_title="Vector Check: Mission Intel", layout="wide")
+
+# CUSTOM CSS: Font sizes and global table centering
+st.markdown("""
+    <style>
+    [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.8rem !important; }
+    
+    .centered-table {
+        display: flex;
+        justify-content: center;
+    }
+    
+    table {
+        margin-left: auto;
+        margin-right: auto;
+        text-align: center !important;
+        width: 80%;
+    }
+    th { text-align: center !important; background-color: #f0f2f6; }
+    td { text-align: center !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.title("🛡️ Vector Check: High-Res Airspace Intelligence")
+
+# 2. SIDEBAR
+st.sidebar.header("Mission Parameters")
+lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f")
+lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f")
+icao = st.sidebar.text_input("Nearest ICAO", value="CYTR").upper()
+
+@st.cache_data(ttl=600)
+def fetch_mission_data(latitude, longitude):
+    url = "https://api.open-meteo.com/v1/forecast"
+    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
+    params = {
+        "latitude": latitude, "longitude": longitude,
+        "hourly": ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", 
+                   "wind_direction_10m", "visibility", "weather_code", "wind_speed_80m", 
+                   "wind_speed_120m", "freezing_level_height", "cloud_cover", "is_day"] + 
+                   [f"temperature_{p}hPa" for p in p_levels] + 
+                   [f"dewpoint_{p}hPa" for p in p_levels],
+        "forecast_days": 2, "timezone": "UTC"
+    }
+    try:
+        res = requests.get(url, params=params, timeout=15)
+        res.raise_for_status()
+        return res.json()
+    except: return None
+
+data = fetch_mission_data(lat, lon)
+
+if data and "hourly" in data:
+    time_list = data["hourly"]["time"]
+    formatted_times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in time_list]
+    st.sidebar.subheader("Timeline (UTC)")
+    selected_time_str = st.sidebar.select_slider("Select Forecast Hour:", options=formatted_times, value=formatted_times[0])
+    idx = formatted_times.index(selected_time_str)
+else:
+    idx = 0
+
+@st.cache_data(ttl=300)
+def get_aviation_weather(station):
+    metar_url = f"https://aviationweather.gov/api/data/metar?ids={station}"
+    taf_url = f"https://aviationweather.gov/api/data/taf?ids={station}"
+    try:
+        m_res = requests.get(metar_url, timeout=10).text.strip()
+        t_res = requests.get(taf_url, timeout=10).text.strip()
+        return m_res if m_res else "No METAR.", t_res if t_res else "No TAF."
+    except: return "Sync Error", "Sync Error"
+
+def get_precip_type(code):
+    mapping = {0: "None", 51: "Drizzle", 56: "Fz Drizzle", 61: "Lgt Rain", 66: "Fz Rain", 71: "Lgt Snow", 95: "TS"}
+    return mapping.get(code, "None")
+
+def h_to_p(h_ft): return 1013.25 * (1 - (h_ft / 145366.45))**(1 / 0.190284)
+
+# 4. MAIN CONTENT
+metar_raw, taf_raw = get_aviation_weather(icao)
+st.subheader(f"📡 Official Aviation Text: {icao}")
+st.success(metar_raw)
+st.info(taf_raw)
+st.divider()
+
+if data and "hourly" in data:
+    h = data["hourly"]
+    def safe_get(key): return h.get(key)[idx]
+
+    # --- MID SECTION: METRICS ---
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    t_s = safe_get('temperature_2m'); rh_s = safe_get('relative_humidity_2m')
+    dewpoint_s = t_s - ((100 - rh_s) / 5)
+    cloud_base_ft = int((t_s - dewpoint_s) * 400)
+    
+    m1.metric("Temperature", f"{int(t_s)}°C")
+    m2.metric("Humidity", f"{int(rh_s)}%")
+    m3.metric("Wind", f"{int(safe_get('wind_direction_10m'))}° @ {int(round(safe_get('wind_speed_10m')))}k/h")
+    m4.metric("Precip / Vis", f"{get_precip_type(safe_get('weather_code'))} / {int(safe_get('visibility')/1000)}km")
+    m5.metric("Freezing Level", f"{int(safe_get('freezing_level_height') * 3.28084):,}ft")
+    m6.metric("Cloud Base/Amt", f"{cloud_base_ft if cloud_base_ft > 500 else 'SFC'}ft / {int(safe_get('cloud_cover'))}%")
+
+    # --- CENTERED HAZARD STACK ---
+    st.subheader(f"📊 Low-Level Hazard Stack (Valid: {selected_time_str})")
+    w10, w80, w120 = safe_get("wind_speed_10m"), safe_get("wind_speed_80m"), safe_get("wind_speed_120m")
+    z_ft = [50, 100, 200, 300, 400]
+    w_interp = np.interp([z * 0.3048 for z in z_ft], [10, 80, 120], [w10, w80, w120])
+    is_day = safe_get('is_day')
+    
+    stack_data = []
+    for i, alt in enumerate(z_ft):
+        spd = int(round(w_interp[i]))
+        prev_spd = int(round(w_interp[i-1])) if i > 0 else spd
+        shear = abs(spd - prev_spd)
+        
+        if shear > 15: turb = "Severe LLWS"
+        elif shear > 8: turb = "Mod LLWS"
+        elif spd > 35: turb = "Severe Mechanical"
+        elif spd > 22: turb = "Mod Mechanical"
+        elif is_day and safe_get('cloud_cover') < 30 and t_s > 20: turb = "Lgt Convective"
+        elif spd > 12: turb = "Lgt Mechanical"
+        else: turb = "Nil"
+        
+        ice = "Nil"
+        if t_s < 3 and (t_s - dewpoint_s) < 3.0:
+            if t_s < -15: ice = "Mod Rime"
+            elif t_s < -10: ice = "Mod Mixed"
+            elif t_s < -2: ice = "Mod Clear"
+            elif t_s <= 0: ice = "Lgt Clear"
+            else: ice = "Trace Mixed"
+
+        stack_data.append({"Alt (AGL)": f"{alt} ft", "km/h": spd, "Turbulence": turb, "Icing": ice})
+    
+    df_stack = pd.DataFrame(stack_data).iloc[::-1]
+    styler = df_stack.style.set_properties(**{'text-align': 'center'}).hide(axis='index')
+    st.markdown('<div class="centered-table">', unsafe_allow_html=True)
+    st.write(styler.to_html(), unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # --- ADIABATIC SOUNDING PROFILE (LEGEND UPDATED) ---
+    st.divider()
+    st.subheader(f"🌡️ Deep Synoptic Ribbon (Convection & Adiabats)")
+    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
+    t_vals = np.array([safe_get(f'temperature_{p}hPa') for p in p_levels])
+    td_vals = np.array([safe_get(f'dewpoint_{p}hPa') for p in p_levels])
+    
+    fig = plt.figure(figsize=(10, 35)) 
+    skew = SkewT(fig, rotation=45)
+    
+    # 1. Adiabatic Reference Lines
+    skew.plot_dry_adiabats(color='orange', alpha=0.3, linewidth=1, linestyle='--')
+    skew.plot_moist_adiabats(color='blue', alpha=0.3, linewidth=1, linestyle='--')
+    
+    # 2. Saturation Shading (Yellow)
+    skew.ax.fill_betweenx(p_levels, t_vals, td_vals, where=((t_vals - td_vals) <= 2), color='yellow', alpha=0.3)
+    
+    # 3. Plot Primary Lines
+    skew.plot(p_levels, t_vals * units.degC, 'r', linewidth=5, label='Temp')
+    skew.plot(p_levels, td_vals * units.degC, 'g', linewidth=5, label='Dewpt')
+    
+    # 4. Custom Altitude Labels
+    for alt_label in [1000, 3000, 5000, 10000, 15000, 20000]:
+        p_val = h_to_p(alt_label)
+        skew.ax.text(-38.5, p_val, f"{alt_label:,} ft", color='blue', fontsize=16, fontweight='bold', ha='right')
+        skew.ax.axhline(p_val, color='blue', alpha=0.15, linestyle='-')
+            
+    # 5. Freezing Line
+    skew.ax.axvline(0, color='cyan', linestyle='-', alpha=0.6, linewidth=3)
+    
+    plt.ylim(1050, 400); plt.xlim(-40, 40)
+    
+    # REDUCED LEGEND SIZE
+    plt.legend(loc='upper right', prop={'size': 12})
+    
+    buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', dpi=130)
+    st.image(buf, use_container_width=True)Vec
