@@ -9,9 +9,10 @@ import io
 import math
 from datetime import datetime
 
-# 1. PAGE CONFIG & UI
+# 1. PAGE CONFIG
 st.set_page_config(page_title="Vector Check: Mission Intel", layout="wide")
 
+# CUSTOM CSS: STEALTH THEME
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.4rem !important; color: #E58E26 !important; }
@@ -23,7 +24,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("🛡️ Vector Check: High-Res Airspace Intelligence")
-st.caption("TACTICAL ADVISORY - HRDPS / HRRR / ECMWF INTEGRATED")
+st.caption("TACTICAL PLANNING: HRDPS (2.5km) & ECMWF (9km) INTEGRATED")
 
 # 2. SIDEBAR
 st.sidebar.header("Mission Parameters")
@@ -32,32 +33,34 @@ lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f")
 icao = st.sidebar.text_input("Nearest ICAO", value="CYTR").upper()
 
 model_choice = st.sidebar.selectbox("Select Forecast Model:", 
-    options=["HRDPS (Canada 2.5km)", "HRRR (USA 3km)", "ECMWF (Global 9km)"])
+    options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
 
 model_api_map = {
     "HRDPS (Canada 2.5km)": "https://api.open-meteo.com/v1/gem",
-    "HRRR (USA 3km)": "https://api.open-meteo.com/v1/gfs",
     "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/ecmwf"
 }
 
-# 3. ROBUST DATA FETCHING
+# 3. DATA FETCHING
 @st.cache_data(ttl=600)
-def fetch_mission_data(latitude, longitude, model_url, model_name):
+def fetch_mission_data(latitude, longitude, model_url):
+    hourly_params = [
+        "temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_gusts_10m",
+        "wind_direction_10m", "visibility", "weather_code", "pressure_msl",
+        "wind_speed_80m", "wind_speed_120m", "wind_speed_100m", "freezing_level_height", "cloud_cover"
+    ]
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
+    hourly_params += [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels]
+
     params = {
         "latitude": latitude, "longitude": longitude,
-        "hourly": ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_gusts_10m",
-                   "wind_direction_10m", "visibility", "weather_code", "wind_speed_80m", 
-                   "wind_speed_120m", "freezing_level_height", "cloud_cover", "pressure_msl"] + 
-                   [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels],
+        "hourly": hourly_params,
         "wind_speed_unit": "kn", "forecast_days": 2, "timezone": "UTC"
     }
-    if "HRRR" in model_name: params["models"] = "hrrr"
     try:
         res = requests.get(model_url, params=params, timeout=15)
         res.raise_for_status()
         return res.json()
-    except Exception: return None
+    except: return None
 
 @st.cache_data(ttl=300)
 def get_aviation_weather(station):
@@ -67,28 +70,23 @@ def get_aviation_weather(station):
         return m or "No METAR", t or "No TAF"
     except: return "Link Error", "Link Error"
 
-# 4. UTILITIES (Fail-Safe)
-def safe_val(val, multiplier=1, default="N/A", precision=0):
-    if val is None: return default
-    res = val * multiplier
-    return f"{res:,.{precision}f}" if precision > 0 else f"{int(round(res)):,}"
+# 4. ROBUST HELPERS
+def safe_val(val, multiplier=1, default="N/A"):
+    return f"{int(round(val * multiplier)):,}" if val is not None else default
 
-def calc_dewpoint(T, RH):
-    if T is None or RH is None: return None
-    a, b = 17.27, 237.7
-    alpha = ((a * T) / (b + T)) + math.log(max(RH, 1)/100.0)
-    return (b * alpha) / (a - alpha)
-
-def calc_da(temp, press_mb):
-    if temp is None or press_mb is None: return None
-    press_alt = (1013.25 - press_mb) * 30
-    return press_alt + (118.8 * (temp - 15))
+def get_best_upper_wind(h_data, idx):
+    # HRDPS provides 80/120. ECMWF usually provides 100.
+    for key, height in [('wind_speed_120m', 120), ('wind_speed_100m', 100), ('wind_speed_80m', 80)]:
+        val_list = h_data.get(key)
+        if val_list and val_list[idx] is not None:
+            return val_list[idx], height
+    return None, None
 
 # 5. MAIN RENDER
-data = fetch_mission_data(lat, lon, model_api_map[model_choice], model_choice)
+data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar, taf = get_aviation_weather(icao)
 
-st.subheader(f"📡 {model_choice} Analysis")
+st.subheader(f"📡 {model_choice} Analysis + {icao} Text")
 c1, c2 = st.columns(2)
 c1.code(metar, language="text")
 c2.code(taf, language="text")
@@ -99,60 +97,51 @@ if data and "hourly" in data:
     selected_time = st.sidebar.select_slider("Forecast Hour:", options=times)
     idx = times.index(selected_time)
     
-    def g(key): return h.get(key)[idx]
-
-    # Derived Calcs
-    td = calc_dewpoint(g('temperature_2m'), g('relative_humidity_2m'))
-    da = calc_da(g('temperature_2m'), g('pressure_msl'))
+    # Core Metrics
+    w10 = h['wind_speed_10m'][idx]
+    gst = h['wind_gusts_10m'][idx]
     
-    # Cloud Base Logic
-    cb_val = "SKC"
-    if td is not None and g('cloud_cover') > 25:
-        base = (g('temperature_2m') - td) * 400
-        cb_val = f"{int(max(base, 0)):,}ft"
-
-    # Metrics
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("TEMP/DP", f"{safe_val(g('temperature_2m'))}°/{safe_val(td)}°C")
-    m2.metric("DENSITY ALT", f"{safe_val(da)} ft")
-    m3.metric("WIND", f"{safe_val(g('wind_direction_10m'))}° @ {safe_val(g('wind_speed_10m'))}kt")
-    m4.metric("GUSTS", f"{safe_val(g('wind_gusts_10m'))} kt")
-    m5.metric("FREEZING LVL", f"{safe_val(g('freezing_level_height'), 3.28084)} ft")
-    m6.metric("CLOUD BASE", cb_val)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("WIND (10m)", f"{safe_val(w10)} kt")
+    m2.metric("GUSTS", f"{safe_val(gst)} kt")
+    m3.metric("FREEZING LVL", f"{safe_val(h['freezing_level_height'][idx], 3.28084)} ft")
+    m4.metric("VISIBILITY", f"{safe_val(h['visibility'][idx], 0.000539957, precision=1)} nm")
 
     # --- HAZARD STACK ---
-    st.subheader("📊 Tactical Hazard Stack")
-    w10, w80 = g('wind_speed_10m'), g('wind_speed_80m')
-    gst = g('wind_gusts_10m')
+    st.subheader("📊 Tactical Hazard Stack (Estimated AGL Winds)")
+    upper_v, upper_h = get_best_upper_wind(h, idx)
     
-    stack = []
-    if all(v is not None for v in [w10, w80, gst]):
-        for alt in [400, 250, 150, 50]:
-            # Simple linear interp for the stack (more stable for sparse data)
-            spd = w10 + (w80 - w10) * ((alt*0.3048 - 10) / 70)
-            cur_gst = spd * (gst / max(w10, 1))
+    if w10 is not None and upper_v is not None:
+        stack = []
+        gst_factor = gst / max(w10, 1)
+        for alt in [400, 300, 200, 100]:
+            # Logarithmic profile interpolation
+            alt_m = alt * 0.3048
+            spd = w10 + (upper_v - w10) * (math.log(alt_m/10) / math.log(upper_h/10))
+            cur_gst = spd * gst_factor
             
-            turb = "NIL"
-            if cur_gst > 25 or (cur_gst - spd) > 12: turb = "⚠️ SEVERE"
-            elif cur_gst > 15: turb = "MOD"
+            status = "🟢 NOMINAL"
+            if cur_gst > 25: status = "🔴 NO-GO (GUST)"
+            elif spd > 20: status = "🟡 CAUTION (WIND)"
             
-            stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Turbulence": turb})
+            stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
         st.table(pd.DataFrame(stack))
     else:
-        st.warning("Insufficient wind data at this level/time for Hazard Stack.")
+        st.warning(f"Note: {model_choice} does not provide enough upper-level wind data for a 400ft stack here.")
 
     # --- SKEW-T ---
     st.divider()
+    st.subheader("🌡️ Thermodynamic Sounding")
     p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
-    t_plot = [g(f'temperature_{p}hPa') for p in p_levs]
-    td_plot = [g(f'dewpoint_{p}hPa') for p in p_levs]
+    t_plot = [h.get(f'temperature_{p}hPa')[idx] for p in p_levs]
+    td_plot = [h.get(f'dewpoint_{p}hPa')[idx] for p in p_levs]
 
     if None not in t_plot:
-        fig = plt.figure(figsize=(7, 9))
+        fig = plt.figure(figsize=(6, 8))
         fig.patch.set_facecolor('#0E1117')
         skew = SkewT(fig, rotation=45)
         skew.ax.set_facecolor('#1B1E23')
-        skew.plot(p_levs, np.array(t_plot) * units.degC, 'r', linewidth=2)
-        skew.plot(p_levs, np.array(td_plot) * units.degC, 'g', linewidth=2)
-        plt.title(f"Thermodynamic Profile: {icao}", color='white')
+        skew.plot(p_levs, np.array(t_plot) * units.degC, 'r', linewidth=2, label="Temp")
+        skew.plot(p_levs, np.array(td_plot) * units.degC, 'g', linewidth=2, label="Dewpoint")
+        plt.title(f"Vertical Profile (UTC: {selected_time})", color='white')
         st.pyplot(fig)
