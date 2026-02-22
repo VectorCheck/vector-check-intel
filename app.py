@@ -13,7 +13,7 @@ from datetime import datetime
 # 1. PAGE CONFIG
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
 
-# CUSTOM CSS: STEALTH THEME (Neutralized Labels)
+# CUSTOM CSS: STEALTH THEME
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.2rem !important; color: #E58E26 !important; }
@@ -141,10 +141,19 @@ if data and "hourly" in data:
     idx = times.index(selected_time)
     
     # --- METRIC ROW CALCULATIONS ---
-    def get_wx_desc(code):
-        if code is None: return "N/A"
-        codes = {0: "Clear", 1: "Mainly Clear", 2: "Partly Cloudy", 3: "Overcast", 45: "Fog", 48: "Dep Fog", 51: "Drizzle", 56: "FZ Drizzle", 61: "Rain", 66: "FZ Rain", 71: "Snow", 77: "Snow Grains", 80: "Showers", 85: "Snow Showers", 95: "TS"}
-        return codes.get(code, "Clear")
+    def get_precip_type(code):
+        # Filtering WMO 4677 to only show hydrometeors
+        precip_codes = {
+            51: "Drizzle", 53: "Drizzle", 55: "Drizzle",
+            56: "FZ Drizzle", 57: "FZ Drizzle",
+            61: "Rain", 63: "Rain", 65: "Rain",
+            66: "FZ Rain", 67: "FZ Rain",
+            71: "Snow", 73: "Snow", 75: "Snow", 77: "Snow Grains",
+            80: "Rain Showers", 81: "Rain Showers", 82: "Rain Showers",
+            85: "Snow Showers", 86: "Snow Showers",
+            95: "TS", 96: "TS + Hail", 99: "TS + Hail"
+        }
+        return precip_codes.get(code, "None")
 
     def estimate_cloud_base(t, rh):
         if t is None or rh is None: return "N/A"
@@ -154,17 +163,22 @@ if data and "hourly" in data:
 
     temp = h['temperature_2m'][idx]
     hum  = h['relative_humidity_2m'][idx]
-    w_dir = h['wind_direction_10m'][idx]
+    w_dir_raw = h['wind_direction_10m'][idx]
     w_spd = h['wind_speed_10m'][idx]
     wx_code = h['weather_code'][idx]
+    
+    # Standard 3-digit wind direction
+    w_dir_display = str(int(w_dir_raw)).zfill(3) if w_dir_raw is not None else "N/A"
     
     # Visibility in Statute Miles (SM)
     vis_raw = h.get('visibility', [None]*len(h['time']))[idx]
     vis_sm = (vis_raw * 0.000621371) if vis_raw is not None else None
     
-    # Freezing Level Logic
+    # Freezing Altitude Logic (SFC priority)
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
-    if frz_raw is not None:
+    if temp is not None and temp <= 0:
+        frz_display = "SFC"
+    elif frz_raw is not None:
         frz_ft = frz_raw * 3.28084
         frz_display = "SFC" if frz_ft < 50 else f"{int(round(frz_ft, -2)):,} ft"
     else:
@@ -176,11 +190,11 @@ if data and "hourly" in data:
     cols = st.columns(8)
     cols[0].metric("Temp", f"{safe_val(temp, precision=1)}°C")
     cols[1].metric("RH", f"{safe_val(hum)}%")
-    cols[2].metric("Wind Dir", f"{safe_val(w_dir)}°")
+    cols[2].metric("Wind Dir", f"{w_dir_display}°")
     cols[3].metric("Wind Spd", f"{safe_val(w_spd)} kt")
-    cols[4].metric("Precip", get_wx_desc(wx_code))
+    cols[4].metric("Precip", get_precip_type(wx_code))
     cols[5].metric("Vis", f"{safe_val(vis_sm, precision=1)} sm")
-    cols[6].metric("FRZ LVL", frz_display)
+    cols[6].metric("Freezing Alt", frz_display)
     cols[7].metric("Cloud", c_base)
 
     # --- HAZARD STACK ---
