@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 # 1. PAGE CONFIG
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
 
-# CUSTOM CSS
+# CUSTOM CSS: STEALTH THEME + DYNAMIC HIGHLIGHTS
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.2rem !important; color: #E58E26 !important; }
@@ -72,10 +72,6 @@ def get_precip_type(code):
 
 # 4. ADVANCED ICING LOGIC (TABLE 2, 3, 4)
 def calculate_icing_profile(hourly_data, idx, wx_code):
-    """
-    Returns a dictionary of icing parameters based on Tables 2, 3, and 4.
-    """
-    # 1. Parse Vertical Profile
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     profile = []
     
@@ -86,18 +82,13 @@ def calculate_icing_profile(hourly_data, idx, wx_code):
         if t is not None and td is not None and h_m is not None:
             profile.append({"p": p, "t": t, "td": td, "h_ft": h_m * 3.28084})
     
-    # 2. Identify Cloud Layers (T-Td <= 2.0 as proxy for saturation)
     cloud_layers = []
     ice_cloud_aloft = False
-    
     current_layer = {"base": None, "top": None, "min_t": 100, "max_t": -100, "inversion": False}
     
     for i, lvl in enumerate(profile):
         is_cloud = (lvl["t"] - lvl["td"]) <= 2.0
-        
-        # Check for Ice Cloud Aloft (Seeder-Feeder): Cloud colder than -20C
-        if is_cloud and lvl["t"] < -20:
-            ice_cloud_aloft = True
+        if is_cloud and lvl["t"] < -20: ice_cloud_aloft = True
             
         if is_cloud:
             if current_layer["base"] is None: 
@@ -106,85 +97,96 @@ def calculate_icing_profile(hourly_data, idx, wx_code):
             current_layer["top"] = lvl["h_ft"]
             current_layer["min_t"] = min(current_layer["min_t"], lvl["t"])
             current_layer["max_t"] = max(current_layer["max_t"], lvl["t"])
-            # Check for inversion within cloud
-            if i > 0 and lvl["t"] > profile[i-1]["t"]:
-                current_layer["inversion"] = True
+            if i > 0 and lvl["t"] > profile[i-1]["t"]: current_layer["inversion"] = True
         else:
             if current_layer["base"] is not None:
-                # Close layer
                 current_layer["thickness"] = current_layer["top"] - current_layer["base"]
                 cloud_layers.append(current_layer)
                 current_layer = {"base": None, "top": None, "min_t": 100, "max_t": -100, "inversion": False}
     
-    if current_layer["base"] is not None: # Close final layer
+    if current_layer["base"] is not None:
         current_layer["thickness"] = current_layer["top"] - current_layer["base"]
         cloud_layers.append(current_layer)
 
-    # 3. Apply Table Logic
     icing_result = {"type": "NONE", "sev": "NONE", "base": 99999, "top": -99999}
     
-    # TABLE 3: Freezing Precipitation (Overrides all)
-    if wx_code in [66, 67]: # FZRA
-        return {"type": "CLR", "sev": "SEV", "base": 0, "top": 10000} # From SFC
-    if wx_code in [56, 57, 77]: # FZDZ, SG
-        return {"type": "MX", "sev": "MOD", "base": 0, "top": 10000} # From SFC
+    if wx_code in [66, 67]: return {"type": "CLR", "sev": "SEV", "base": 0, "top": 10000}
+    if wx_code in [56, 57, 77]: return {"type": "MX", "sev": "MOD", "base": 0, "top": 10000}
 
-    # Iterate through found cloud layers to assess Stable vs SLD
     for layer in cloud_layers:
-        # Check Icing Temp Range (0 to -15)
         if layer["max_t"] <= 0 and layer["min_t"] >= -15:
-            
-            # TABLE 4: SLD (Low Level, No Ice Aloft)
-            # Conditions: Thickness >= 2000ft AND No Ice Cloud Aloft
             if layer["thickness"] >= 2000 and not ice_cloud_aloft:
-                # Basic
-                i_type = "MX"
-                i_sev = "LGT"
-                
-                # Modifiers
-                if wx_code in [71, 73, 75, 85, 86]: # Snow at SFC -> Downgrade
-                    i_sev = "NONE"
-                elif layer["inversion"]: # Inversion -> Upgrade
-                    i_sev = "MOD"
-                
+                i_type, i_sev = "MX", "LGT"
+                if wx_code in [71, 73, 75, 85, 86]: i_sev = "NONE"
+                elif layer["inversion"]: i_sev = "MOD"
                 if i_sev != "NONE":
                     icing_result = {"type": i_type, "sev": i_sev, "base": layer["base"], "top": layer["top"]}
-                    break # Found the worst case, break
-
-            # TABLE 2: Stable Cloud (If SLD conditions not met)
+                    break
             else:
-                i_type = "RIME"
-                i_sev = "NONE"
-                
+                i_type, i_sev = "RIME", "NONE"
                 if layer["thickness"] > 5000: i_sev = "MOD"
                 elif layer["thickness"] >= 2000: i_sev = "LGT"
-                
-                # Modifiers
-                if wx_code in [51, 53, 55, 61, 63, 65, 80, 81, 82]: # Rain at SFC (if layer is freezing?) unlikely but downgrade
-                    pass 
-                if wx_code in [71, 73, 75, 85, 86]: # Snow at SFC -> Downgrade
-                    if i_sev == "MOD": i_sev = "LGT"
-                    else: i_sev = "NONE"
-                
+                if wx_code in [71, 73, 75, 85, 86]:
+                    i_sev = "LGT" if i_sev == "MOD" else "NONE"
                 if i_sev != "NONE":
                     icing_result = {"type": i_type, "sev": i_sev, "base": layer["base"], "top": layer["top"]}
                     break
 
     return icing_result
 
-# 5. FETCHING
+# 5. FETCHING WITH FAILOVER
 @st.cache_data(ttl=300)
 def get_aviation_weather(station):
     API_KEY = "c453505478304bbbae7761f99c8a84ba" 
     headers = {"X-API-Key": API_KEY}
+    
+    # PRIMARY LINK: CheckWX
     try:
-        m_res = requests.get(f"https://api.checkwx.com/metar/{station}/decoded?count=3", headers=headers, timeout=10).json()
-        t_res = requests.get(f"https://api.checkwx.com/taf/{station}/decoded", headers=headers, timeout=10).json()
-        metars = [apply_tactical_highlights(r.get('raw_text', '')) for r in m_res.get('data', [])]
-        taf_raw = t_res['data'][0].get('raw_text', "NO ACTIVE TAF") if t_res.get('data') else "NO ACTIVE TAF"
-        taf_final = re.sub(r'\b(FM\d{6}|TEMPO|PROB\d{2}|BECMG)\b', r'<br><b>\1</b>', apply_tactical_highlights(taf_raw))
-        return "<br>".join(metars) if metars else "NO DATA", taf_final
-    except: return "CONN ERROR", "CONN ERROR"
+        m_res = requests.get(f"https://api.checkwx.com/metar/{station}/decoded?count=3", headers=headers, timeout=10)
+        t_res = requests.get(f"https://api.checkwx.com/taf/{station}/decoded", headers=headers, timeout=10)
+        
+        if m_res.status_code == 200 and t_res.status_code == 200:
+            m_data = m_res.json()
+            t_data = t_res.json()
+            metars = [apply_tactical_highlights(r.get('raw_text', '')) for r in m_data.get('data', [])]
+            for i in range(len(metars)):
+                if "SPECI" in metars[i]:
+                    metars[i] = metars[i].replace("SPECI", '<span style="color: #E58E26; font-weight: bold;">SPECI</span>')
+            taf_raw = t_data['data'][0].get('raw_text', "NO ACTIVE TAF") if t_data.get('data') else "NO ACTIVE TAF"
+            taf_final = re.sub(r'\b(FM\d{6}|TEMPO|PROB\d{2}|BECMG)\b', r'<br><b>\1</b>', apply_tactical_highlights(taf_raw))
+            return "<br>".join(metars) if metars else "NO DATA", taf_final
+    except Exception:
+        pass # Fall silently to alternate link
+
+    # ALTERNATE LINK: AviationWeather.gov
+    try:
+        hdr = {'User-Agent': 'Mozilla/5.0'}
+        m_url = f"https://aviationweather.gov/api/data/metar?ids={station}&hours=3"
+        t_url = f"https://aviationweather.gov/api/data/taf?ids={station}"
+        
+        m_res_alt = requests.get(m_url, headers=hdr, timeout=10)
+        t_res_alt = requests.get(t_url, headers=hdr, timeout=10)
+        
+        if m_res_alt.status_code == 200:
+            m_lines = m_res_alt.text.strip().split('\n')
+            m_lines = [apply_tactical_highlights(m) for m in m_lines if m][:3]
+            for i in range(len(m_lines)):
+                if "SPECI" in m_lines[i]:
+                    m_lines[i] = m_lines[i].replace("SPECI", '<span style="color: #E58E26; font-weight: bold;">SPECI</span>')
+            final_metar = "<br>".join(m_lines) if m_lines else "NO DATA"
+        else:
+            final_metar = f"AWC METAR ERROR: {m_res_alt.status_code}"
+            
+        if t_res_alt.status_code == 200:
+            taf_raw = t_res_alt.text.strip() or "NO ACTIVE TAF"
+            taf_final = re.sub(r'\b(FM\d{6}|TEMPO|PROB\d{2}|BECMG)\b', r'<br><b>\1</b>', apply_tactical_highlights(taf_raw))
+        else:
+            taf_final = f"AWC TAF ERROR: {t_res_alt.status_code}"
+            
+        return f"<span style='color:#E58E26;'>[PRIMARY LINK FAILED - USING ALTERNATE]</span><br>{final_metar}", taf_final
+        
+    except Exception as e:
+        return f"TOTAL DATA LINK FAILURE: {str(e)[:40]}", "TOTAL DATA LINK FAILURE"
 
 @st.cache_data(ttl=600)
 def fetch_mission_data(lat, lon, model_url):
@@ -194,10 +196,7 @@ def fetch_mission_data(lat, lon, model_url):
         hourly += ["wind_gusts_10m", "wind_speed_80m", "wind_speed_120m"]
     else:
         hourly += ["wind_speed_100m"]
-    
-    # Added geopotential_height for cloud thickness calc
     hourly += [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels] + [f"geopotential_height_{p}hPa" for p in p_levels]
-    
     params = {"latitude": lat, "longitude": lon, "hourly": hourly, "wind_speed_unit": "kn", "forecast_hours": 48, "timezone": "UTC"}
     res = requests.get(model_url, params=params)
     return res.json() if res.status_code == 200 else None
@@ -236,7 +235,6 @@ if data and "hourly" in data:
     upper_v = h.get('wind_speed_120m', h.get('wind_speed_100m', [w_spd*1.5]*len(h['time'])))[idx]
     upper_h = 120 if h.get('wind_speed_120m') else 100
 
-    # CALCULATE ADVANCED ICING PROFILE
     icing_cond = calculate_icing_profile(h, idx, wx)
 
     stack = []
@@ -244,19 +242,16 @@ if data and "hourly" in data:
         spd = w_spd + (upper_v - w_spd) * (math.log(alt*0.3/10) / math.log(upper_h/10))
         cur_gst = spd * (gst / max(w_spd, 1))
         
-        # --- TURBULENCE ---
         shear = spd - w_spd
         if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
         elif shear > 10 and w_spd > 15: turb_type, turb_sev = "LLWS", ("SEV" if shear > 15 else "MDT")
         else: turb_type, turb_sev = "MECH", ("SEV" if cur_gst > 25 else ("MDT" if cur_gst > 15 else "LGT"))
         turb_final = "NONE" if cur_gst < 10 else f"{turb_sev} {turb_type}"
 
-        # --- ICING (Volumetric Mapping) ---
-        # Map the altitude to the calculated icing layers
         ice_final = "NONE"
         if icing_cond["base"] <= alt <= icing_cond["top"]:
              ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
-        elif icing_cond["base"] == 0 and alt < icing_cond["top"]: # Surface based logic (Table 3)
+        elif icing_cond["base"] == 0 and alt < icing_cond["top"]:
              ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
 
         stack.append({
