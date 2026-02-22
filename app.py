@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from metpy.plots import SkewT
 from metpy.units import units
 import io
+import math
 from datetime import datetime
 
 # 1. PAGE CONFIG & UI LOCK
@@ -24,6 +25,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("🛡️ Vector Check: High-Res Airspace Intelligence")
+st.caption("SUPPLEMENTAL DATA ONLY - CROSS-REFERENCE WITH NAV CANADA / NOTAMS")
 
 # 2. SIDEBAR
 st.sidebar.header("Mission Parameters")
@@ -37,12 +39,12 @@ def fetch_mission_data(latitude, longitude):
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     params = {
         "latitude": latitude, "longitude": longitude,
-        "hourly": ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", 
+        "hourly": ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_gusts_10m",
                    "wind_direction_10m", "visibility", "weather_code", "wind_speed_80m", 
-                   "wind_speed_120m", "freezing_level_height", "cloud_cover", "is_day"] + 
+                   "wind_speed_120m", "freezing_level_height", "cloud_cover", "pressure_msl"] + 
                    [f"temperature_{p}hPa" for p in p_levels] + 
                    [f"dewpoint_{p}hPa" for p in p_levels],
-        "forecast_days": 2, "timezone": "UTC"
+        "wind_speed_unit": "kn", "forecast_days": 2, "timezone": "UTC"
     }
     try:
         res = requests.get(url, params=params, timeout=15)
@@ -54,112 +56,100 @@ def fetch_mission_data(latitude, longitude):
 
 data = fetch_mission_data(lat, lon)
 
-if data and "hourly" in data:
-    time_list = data["hourly"]["time"]
-    formatted_times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in time_list]
-    st.sidebar.subheader("Timeline (UTC)")
-    selected_time_str = st.sidebar.select_slider("Select Forecast Hour:", options=formatted_times, value=formatted_times[0])
-    idx = formatted_times.index(selected_time_str)
-else:
-    idx = 0
+# 3. HELPER MATH
+def calc_dewpoint(T, RH):
+    # Magnus-Tetens Approximation
+    a, b = 17.27, 237.7
+    alpha = ((a * T) / (b + T)) + math.log(RH/100.0)
+    return (b * alpha) / (a - alpha)
 
-@st.cache_data(ttl=300)
-def get_aviation_weather(station):
-    metar_url = f"https://aviationweather.gov/api/data/metar?ids={station}"
-    taf_url = f"https://aviationweather.gov/api/data/taf?ids={station}"
-    try:
-        m_res = requests.get(metar_url, timeout=10).text.strip()
-        t_res = requests.get(taf_url, timeout=10).text.strip()
-        return m_res if m_res else "No METAR available.", t_res if t_res else "No TAF available."
-    except:
-        return "Sync Error", "Sync Error"
+def calc_density_alt(temp, press_mb, elev_ft=0):
+    # Simplified DA formula
+    isa_temp = 15 - (elev_ft / 1000 * 1.98)
+    press_alt = elev_ft + (1013.25 - press_mb) * 30
+    return press_alt + (118.8 * (temp - isa_temp))
 
-def get_precip_type(code):
-    mapping = {0: "Clear", 1: "Mainly Clear", 2: "Partly Cloudy", 3: "Overcast", 45: "Fog", 51: "Drizzle", 56: "Fz Drizzle", 61: "Lgt Rain", 66: "Fz Rain", 71: "Lgt Snow", 95: "TS"}
-    return mapping.get(code, "Unknown")
-
-def h_to_p(h_ft):
-    return 1013.25 * (1 - (h_ft / 145366.45))**(1 / 0.190284)
+def get_log_wind(z, z1, v1, z2, v2):
+    # Logarithmic wind profile interpolation for RPA levels
+    return v1 + (v2 - v1) * (math.log(z / z1) / math.log(z2 / z1))
 
 # 4. MAIN CONTENT
-metar_raw, taf_raw = get_aviation_weather(icao)
-st.subheader(f"📡 Aviation Text: {icao}")
-st.code(metar_raw, language="text")
-st.code(taf_raw, language="text")
-st.divider()
-
 if data and "hourly" in data:
     h = data["hourly"]
+    time_list = h["time"]
+    formatted_times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in time_list]
+    selected_time_str = st.sidebar.select_slider("Select Forecast Hour:", options=formatted_times)
+    idx = formatted_times.index(selected_time_str)
+    
     def safe_get(key): return h.get(key)[idx]
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    # Metrics Row
     t_s = safe_get('temperature_2m')
     rh_s = safe_get('relative_humidity_2m')
-    # Better Dewpoint Calculation
-    dewpoint_s = t_s - ((100 - rh_s) / 5) 
-    cloud_base_ft = int((t_s - dewpoint_s) * 400)
-    
-    m1.metric("TEMP", f"{int(t_s)}°C")
-    m2.metric("HUMIDITY", f"{int(rh_s)}%")
-    m3.metric("WIND (10m)", f"{int(safe_get('wind_direction_10m'))}° @ {int(round(safe_get('wind_speed_10m')))}k/h")
-    m4.metric("VISIBILITY", f"{int(safe_get('visibility')/1000)}km")
+    p_msl = safe_get('pressure_msl')
+    td_s = calc_dewpoint(t_s, rh_s)
+    da = calc_density_alt(t_s, p_msl)
+    cloud_base_ft = int((t_s - td_s) * 400)
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("TEMP / DP", f"{int(t_s)}° / {int(td_s)}°C")
+    m2.metric("DENSITY ALT", f"{int(da):,} ft")
+    m3.metric("WIND (10m)", f"{int(safe_get('wind_direction_10m'))}° @ {int(safe_get('wind_speed_10m'))}kt")
+    m4.metric("GUSTS", f"{int(safe_get('wind_gusts_10m'))} kt")
     m5.metric("FREEZING LVL", f"{int(safe_get('freezing_level_height') * 3.28084):,}ft")
-    m6.metric("CLOUD BASE", f"{max(cloud_base_ft, 0) if safe_get('cloud_cover') > 20 else 'SKC'}ft")
+    m6.metric("CLOUD BASE", f"{max(cloud_base_ft, 0) if safe_get('cloud_cover') > 30 else 'SKC'}ft")
 
     # --- HAZARD STACK ---
     st.subheader(f"📊 Tactical Hazard Stack (Valid: {selected_time_str})")
     w10, w80, w120 = safe_get("wind_speed_10m"), safe_get("wind_speed_80m"), safe_get("wind_speed_120m")
-    z_ft = [50, 100, 200, 300, 400]
-    w_interp = np.interp([z * 0.3048 for z in z_ft], [10, 80, 120], [w10, w80, w120])
+    gust_ratio = safe_get("wind_gusts_10m") / max(w10, 1)
     
+    z_ft = [50, 150, 250, 400]
     stack_data = []
-    for i, alt in enumerate(z_ft):
-        spd = int(round(w_interp[i]))
-        # Turbulence Logic
-        if spd > 35: turb = "⚠️ SEVERE MECH"
-        elif spd > 22: turb = "MOD MECH"
-        elif spd > 12: turb = "LGT MECH"
+    for alt in z_ft:
+        # Logarithmic Interpolation for better RPA-level wind accuracy
+        spd = get_log_wind(alt * 0.3048, 10, w10, 80, w80)
+        est_gust = spd * gust_ratio
+        
+        # Turbulence Logic (Special Ops Standards)
+        if est_gust > 30 or (est_gust - spd) > 15: turb = "⚠️ SEVERE MECH"
+        elif est_gust > 20: turb = "MOD MECH"
+        elif est_gust > 12: turb = "LGT MECH"
         else: turb = "NIL"
         
         # Icing Logic
         ice = "NIL"
-        if t_s <= 2 and rh_s > 80:
-            if t_s < -10: ice = "❄️ MOD RIME"
-            else: ice = "💧 MOD CLEAR"
+        if t_s <= 3 and rh_s > 80:
+            ice = "❄️ MOD RIME" if t_s < -8 else "💧 MOD CLEAR"
 
-        stack_data.append({"Alt (AGL)": f"{alt} ft", "Wind (km/h)": spd, "Turbulence": turb, "Icing": ice})
+        stack_data.append({
+            "Alt (AGL)": f"{alt} ft", 
+            "Wind (kt)": int(round(spd)), 
+            "Est Gust (kt)": int(round(est_gust)),
+            "Turbulence": turb, 
+            "Icing": ice
+        })
     
-    df_stack = pd.DataFrame(stack_data).iloc[::-1]
-    st.markdown('<div class="centered-table">', unsafe_allow_html=True)
-    st.table(df_stack)
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.table(pd.DataFrame(stack_data).iloc[::-1])
 
     # --- SKEW-T SOUNDING ---
     st.divider()
-    st.subheader(f"🌡️ Thermodynamic Profile (Skew-T)")
+    st.subheader("🌡️ Thermodynamic Profile (Skew-T)")
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     t_vals = np.array([safe_get(f'temperature_{p}hPa') for p in p_levels])
     td_vals = np.array([safe_get(f'dewpoint_{p}hPa') for p in p_levels])
     
-    fig = plt.figure(figsize=(9, 12)) 
+    fig = plt.figure(figsize=(8, 10)) 
     fig.patch.set_facecolor('#0E1117') 
     skew = SkewT(fig, rotation=45)
     skew.ax.set_facecolor('#1B1E23')
-
-    # Lines and Colors
-    skew.plot(p_levels, t_vals * units.degC, '#EB2F06', linewidth=4, label='Temp')
-    skew.plot(p_levels, td_vals * units.degC, '#78E08F', linewidth=4, label='Dewpt')
-    skew.plot_dry_adiabats(color='#E58E26', alpha=0.15)
-    skew.plot_moist_adiabats(color='#4A69BD', alpha=0.15)
+    skew.plot(p_levels, t_vals * units.degC, '#EB2F06', linewidth=3, label='Temp')
+    skew.plot(p_levels, td_vals * units.degC, '#78E08F', linewidth=3, label='Dewpt')
     
-    # Custom Labels
-    for alt_label in [2000, 5000, 10000, 15000]:
-        p_val = h_to_p(alt_label)
-        skew.ax.text(-35, p_val, f"{alt_label}ft", color='#8E949E', fontsize=10, ha='right')
-
+    # Standard labels
+    plt.title(f"Upper Air Analysis: {icao}", color='white', loc='left')
     plt.ylim(1050, 400)
-    plt.xlim(-30, 40)
-    plt.title("Vector Check: Upper Air Analysis", color='white')
+    plt.xlim(-30, 30)
     
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches='tight', facecolor=fig.get_facecolor())
