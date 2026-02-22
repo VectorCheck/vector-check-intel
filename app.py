@@ -165,7 +165,7 @@ def get_aviation_weather(station):
 
 @st.cache_data(ttl=600)
 def fetch_mission_data(lat, lon, model_url):
-    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
+    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     hourly = ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_direction_10m", "weather_code", "freezing_level_height"]
     
     if "gem" in model_url: 
