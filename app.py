@@ -26,7 +26,6 @@ st.markdown("""
 
 # 2. SIDEBAR & LOGO
 LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
-
 try:
     st.sidebar.image(LOGO_URL, use_container_width=True)
 except Exception:
@@ -53,6 +52,7 @@ def safe_val(val, multiplier=1, default="N/A", precision=0):
     return f"{res:,.{precision}f}" if precision > 0 else f"{int(round(res)):,}"
 
 def get_best_upper_wind(h_data, idx):
+    # Search for the highest resolution boundary layer wind available
     for key, height in [('wind_speed_120m', 120), ('wind_speed_100m', 100), ('wind_speed_80m', 80)]:
         val_list = h_data.get(key)
         if val_list and val_list[idx] is not None:
@@ -70,7 +70,7 @@ def estimate_tactical_visibility(temp, rh, weather_code):
         elif weather_code in [45, 48]: vis_est = min(vis_est, 0.25)
     return min(10.0, vis_est)
 
-# 4. DATA FETCHING (AVWX Mirror Logic)
+# 4. DATA FETCHING (48H SLIDING WINDOW & CHECK-WX)
 @st.cache_data(ttl=600)
 def fetch_mission_data(latitude, longitude, model_url, time_key):
     hourly_params = [
@@ -94,79 +94,52 @@ def fetch_mission_data(latitude, longitude, model_url, time_key):
 @st.cache_data(ttl=300)
 def get_aviation_weather(station):
     station = station.strip().upper()
-    # Mirroring through AVWX which is generally not blocked by cloud servers
+    API_KEY = "c453505478304bbbae7761f99c8a84ba" 
+    headers = {"X-API-Key": API_KEY}
     try:
-        # We request the 3 most recent reports for SPECI visibility
-        m_url = f"https://avwx.rest/api/metar/{station}?n=3&format=json"
-        t_url = f"https://avwx.rest/api/taf/{station}?format=json"
+        # Pulling the last 3 reports to ensure SPECIs are captured
+        m_url = f"https://api.checkwx.com/metar/{station}/decoded?count=3"
+        t_url = f"https://api.checkwx.com/taf/{station}/decoded"
         
-        # Note: In a production environment, you'd add your AVWX Token here.
-        # This fallback uses their public/open access if available.
-        m_res = requests.get(m_url, timeout=10)
-        t_res = requests.get(t_url, timeout=10)
+        m_res = requests.get(m_url, headers=headers, timeout=10)
+        t_res = requests.get(t_url, headers=headers, timeout=10)
         
         m_data = m_res.json()
-        if isinstance(m_data, list):
-            metars = [rep.get('raw') for rep in m_data if rep.get('raw')]
-            final_metar = "<br>".join(metars)
-        elif isinstance(m_data, dict):
-            final_metar = m_data.get('raw', "STATION INACTIVE")
-        else:
-            final_metar = "NO DATA"
-
+        metars = []
+        if m_data.get('data'):
+            for report in m_data['data']:
+                raw = report.get('raw_text', '')
+                # Met Tech: Highlight SPECI for tactical awareness
+                if "SPECI" in raw:
+                    raw = raw.replace("SPECI", '<span style="color: #E58E26; font-weight: bold;">SPECI</span>')
+                metars.append(raw)
+        
+        final_metar = "<br>".join(metars) if metars else "STATION INACTIVE / NO DATA"
+        
         t_data = t_res.json()
-        final_taf = t_data.get('raw', "NO ACTIVE TAF")
+        final_taf = t_data['data'][0].get('raw_text', "NO ACTIVE TAF") if t_data.get('data') else "NO ACTIVE TAF"
         
         return final_metar, final_taf
-    except:
-        # If the mirror is down, we use a formatted warning
-        return "DATA LINK OFFLINE - CHECK ICAO", "DATA LINK OFFLINE"
-
-def highlight_aviation_weather(text):
-    if "OFFLINE" in text or "INACTIVE" in text: 
-        return f"<span style='color: #ff4b4b;'>{text}</span>"
-    
-    text = text.replace("SPECI", '<span style="color: #E58E26; font-weight: bold;">SPECI</span>')
-    
-    def vis_replacer(match):
-        val_str = match.group(1)
-        try:
-            val = float(eval(val_str)) if '/' in val_str else float(val_str)
-            if val < 3: return f'<span style="color: #ff4b4b; font-weight: bold;">{match.group(0)}</span>'
-            if val <= 5: return f'<span style="color: #f6ec15; font-weight: bold;">{match.group(0)}</span>'
-        except: pass
-        return match.group(0)
-
-    def cloud_replacer(match):
-        try:
-            height = int(match.group(2)) * 100
-            if height < 1000: return f'<span style="color: #ff4b4b; font-weight: bold;">{match.group(0)}</span>'
-            if height <= 3000: return f'<span style="color: #f6ec15; font-weight: bold;">{match.group(0)}</span>'
-        except: pass
-        return match.group(0)
-
-    text = re.sub(r'(\d+/\d+|\d+)SM', vis_replacer, text)
-    text = re.sub(r'(BKN|OVC|VV)(\d{3})', cloud_replacer, text)
-    return text
+    except Exception as e:
+        return f"API ERROR: {str(e)[:15]}", "CONNECTION ERROR"
 
 # 5. MAIN RENDER
 st.title("Atmospheric Risk Management")
 st.caption("Vector Check Aerial Group Inc. | Specialized Drone Operations & Weather Consulting")
 
-# Time-aware cache key
+# Cache-busting key based on current hour
 current_hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
 data = fetch_mission_data(lat, lon, model_api_map[model_choice], current_hour_key)
 
 metar_raw, taf_raw = get_aviation_weather(icao)
-metar_h = highlight_aviation_weather(metar_raw)
-taf_h = highlight_aviation_weather(taf_raw).replace('TAF ', 'TAF<br>').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')
 
+# Observation Display
 st.markdown(f"""
     <div style="background-color: #1B1E23; padding: 15px; border: 1px solid #2D3139; border-radius: 5px; font-family: monospace; color: #D1D5DB; font-size: 0.85rem; line-height: 1.5;">
         <strong style="color: #8E949E; text-transform: uppercase; font-family: sans-serif;">Observations (Last 3)</strong><br>
-        {metar_h}<br><br>
+        {metar_raw}<br><br>
         <strong style="color: #8E949E; text-transform: uppercase; font-family: sans-serif;">TAF</strong><br>
-        {taf_h}
+        {taf_raw}
     </div>
     """, unsafe_allow_html=True)
 
@@ -175,10 +148,10 @@ st.divider()
 if data and "hourly" in data:
     h = data["hourly"]
     times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in h["time"]]
-    selected_time = st.sidebar.select_slider("Forecast Hour:", options=times, value=times[0])
+    selected_time = st.sidebar.select_slider("Forecast Hour (48h Window):", options=times, value=times[0])
     idx = times.index(selected_time)
     
-    # ... (Rest of logic: Metrics, Hazard Stack, and Skew-T remain unchanged)
+    # Process Metrics
     temp = h['temperature_2m'][idx]
     hum  = h['relative_humidity_2m'][idx]
     w_dir_raw = h['wind_direction_10m'][idx]
@@ -188,6 +161,7 @@ if data and "hourly" in data:
     w_dir_display = str(int(w_dir_raw)).zfill(3) if w_dir_raw is not None else "N/A"
     vis_sm = estimate_tactical_visibility(temp, hum, wx_code)
     
+    # Freezing Level Logic
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
     if temp is not None and temp <= 0: frz_display = "SFC"
     elif frz_raw is not None:
@@ -195,6 +169,7 @@ if data and "hourly" in data:
         frz_display = "SFC" if frz_ft < 50 else f"{int(round(frz_ft, -2)):,} ft"
     else: frz_display = "N/A"
     
+    # Estimated LCL (Cloud Base)
     c_base = "Clear" if hum < 55 else f"{int(round((temp - (temp - ((100 - hum)/5))) * 122 * 3.28084, -2))} ft"
 
     cols = st.columns(8)
@@ -202,19 +177,21 @@ if data and "hourly" in data:
     cols[1].metric("RH", f"{safe_val(hum)}%")
     cols[2].metric("Wind Dir", f"{w_dir_display}°")
     cols[3].metric("Wind Spd", f"{safe_val(w_spd)} kt")
-    cols[4].metric("Precip", "None" if wx_code < 50 else "Active")
-    cols[5].metric("Vis", f"{safe_val(vis_sm, precision=1)} sm")
-    cols[6].metric("Freezing Alt", frz_display)
-    cols[7].metric("Cloud", c_base)
+    cols[4].metric("Wx Code", f"{wx_code}")
+    cols[5].metric("Vis (Est)", f"{safe_val(vis_sm, precision=1)} sm")
+    cols[6].metric("Freezing", frz_display)
+    cols[7].metric("Cloud Base", c_base)
 
     st.subheader("Tactical Hazard Stack")
     gst = h['wind_gusts_10m'][idx]
     upper_v, upper_h = get_best_upper_wind(h, idx)
+    
     if w_spd is not None and upper_v is not None and gst is not None:
         stack = []
         gst_factor = gst / max(w_spd, 1)
         for alt in [400, 300, 200, 100]:
             alt_m = alt * 0.3048
+            # Logarithmic wind profile for AGL estimation
             spd = w_spd + (upper_v - w_spd) * (math.log(alt_m/10) / math.log(upper_h/10))
             cur_gst = spd * gst_factor
             status = "NOMINAL"
@@ -222,11 +199,16 @@ if data and "hourly" in data:
             elif spd > 20: status = "CAUTION (WIND)"
             stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
         st.table(pd.DataFrame(stack))
+    else:
+        st.warning("Upper-air wind data unavailable for this timestamp.")
 
     st.divider()
+    
+    # Skew-T Vertical Profile
     p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     t_plot = [h.get(f'temperature_{p}hPa')[idx] for p in p_levs]
     td_plot = [h.get(f'dewpoint_{p}hPa')[idx] for p in p_levs]
+    
     if None not in t_plot:
         fig = plt.figure(figsize=(6, 8))
         fig.patch.set_facecolor('#0E1117')
@@ -236,3 +218,5 @@ if data and "hourly" in data:
         skew.plot(p_levs, np.array(td_plot) * units.degC, 'g', linewidth=2, label="Dewpoint")
         plt.title(f"Vertical Profile (UTC: {selected_time})", color='white')
         st.pyplot(fig)
+else:
+    st.error("Unable to retrieve forecast model data. Please check coordinates.")
