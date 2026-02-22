@@ -12,15 +12,26 @@ from datetime import datetime
 # 1. PAGE CONFIG
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
 
-# CUSTOM CSS: STEALTH THEME
-st.markdown("""
-    <style>
-    [data-testid="stMetricValue"] { font-size: 1.4rem !important; color: #E58E26 !important; }
-    [data-testid="stMetricLabel"] { font-size: 0.8rem !important; color: #8E949E !important; }
-    table { margin-left: auto; margin-right: auto; text-align: center !important; width: 90%; border-collapse: collapse; background-color: #1B1E23; }
-    th { text-align: center !important; color: #8E949E !important; font-weight: bold !important; padding: 10px !important; border-bottom: 2px solid #3E444E !important; text-transform: uppercase; }
-    td { text-align: center !important; padding: 8px !important; color: #D1D5DB !important; border-bottom: 1px solid #2D3139 !important; }
-    </style>
+# CUSTOM CSS FOR AVIATION TEXT (Tightened Spacing)
+st.markdown(f"""
+    <div style="
+        background-color: #1B1E23; 
+        padding: 15px; 
+        border: 1px solid #2D3139; 
+        border-radius: 5px; 
+        font-family: sans-serif; 
+        color: #D1D5DB; 
+        font-size: 0.9rem;
+    ">
+        <div style="margin-bottom: 8px;">
+            <strong style="color: #8E949E; text-transform: uppercase; font-size: 0.75rem;">METAR</strong><br>
+            <span>{metar}</span>
+        </div>
+        <div>
+            <strong style="color: #8E949E; text-transform: uppercase; font-size: 0.75rem;">TAF</strong><br>
+            <span>{taf.replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')}</span>
+        </div>
+    </div>
     """, unsafe_allow_html=True)
 
 st.title("Atmospheric Risk Management")
