@@ -13,11 +13,11 @@ from datetime import datetime
 # 1. PAGE CONFIG
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
 
-# CUSTOM CSS: STEALTH THEME
+# CUSTOM CSS: STEALTH THEME (Neutralized Labels)
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.2rem !important; color: #E58E26 !important; }
-    [data-testid="stMetricLabel"] { font-size: 0.8rem !important; color: #8E949E !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.8rem !important; color: #A0A4AB !important; text-transform: uppercase; }
     table { margin-left: auto; margin-right: auto; text-align: center !important; width: 90%; border-collapse: collapse; background-color: #1B1E23; }
     th { text-align: center !important; color: #8E949E !important; font-weight: bold !important; padding: 10px !important; border-bottom: 2px solid #3E444E !important; text-transform: uppercase; }
     td { text-align: center !important; padding: 8px !important; color: #D1D5DB !important; border-bottom: 1px solid #2D3139 !important; }
@@ -140,7 +140,7 @@ if data and "hourly" in data:
     selected_time = st.sidebar.select_slider("Forecast Hour:", options=times)
     idx = times.index(selected_time)
     
-    # --- HARDENED METRIC ROW CALCULATIONS ---
+    # --- METRIC ROW CALCULATIONS ---
     def get_wx_desc(code):
         if code is None: return "N/A"
         codes = {0: "Clear", 1: "Mainly Clear", 2: "Partly Cloudy", 3: "Overcast", 45: "Fog", 48: "Dep Fog", 51: "Drizzle", 56: "FZ Drizzle", 61: "Rain", 66: "FZ Rain", 71: "Snow", 77: "Snow Grains", 80: "Showers", 85: "Snow Showers", 95: "TS"}
@@ -158,25 +158,30 @@ if data and "hourly" in data:
     w_spd = h['wind_speed_10m'][idx]
     wx_code = h['weather_code'][idx]
     
-    # Safety checks for visibility and freezing level
+    # Visibility in Statute Miles (SM)
     vis_raw = h.get('visibility', [None]*len(h['time']))[idx]
-    vis = (vis_raw * 0.001) if vis_raw is not None else None
+    vis_sm = (vis_raw * 0.000621371) if vis_raw is not None else None
     
+    # Freezing Level Logic
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
-    frz = (frz_raw * 3.28084) if frz_raw is not None else None
+    if frz_raw is not None:
+        frz_ft = frz_raw * 3.28084
+        frz_display = "SFC" if frz_ft < 50 else f"{int(round(frz_ft, -2)):,} ft"
+    else:
+        frz_display = "N/A"
     
     c_base = estimate_cloud_base(temp, hum)
 
     # Render 8-Column Metric Row
     cols = st.columns(8)
-    cols[0].metric("TEMP", f"{safe_val(temp, precision=1)}°C")
+    cols[0].metric("Temp", f"{safe_val(temp, precision=1)}°C")
     cols[1].metric("RH", f"{safe_val(hum)}%")
-    cols[2].metric("WIND DIR", f"{safe_val(w_dir)}°")
-    cols[3].metric("WIND SPD", f"{safe_val(w_spd)} kt")
-    cols[4].metric("PRECIP", get_wx_desc(wx_code))
-    cols[5].metric("VIS", f"{safe_val(vis, precision=1)} km")
-    cols[6].metric("FRZ LVL", f"{safe_val(frz)} ft")
-    cols[7].metric("CLOUD", c_base)
+    cols[2].metric("Wind Dir", f"{safe_val(w_dir)}°")
+    cols[3].metric("Wind Spd", f"{safe_val(w_spd)} kt")
+    cols[4].metric("Precip", get_wx_desc(wx_code))
+    cols[5].metric("Vis", f"{safe_val(vis_sm, precision=1)} sm")
+    cols[6].metric("FRZ LVL", frz_display)
+    cols[7].metric("Cloud", c_base)
 
     # --- HAZARD STACK ---
     st.subheader("Tactical Hazard Stack (Estimated AGL Winds)")
