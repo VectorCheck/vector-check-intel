@@ -9,6 +9,7 @@ import io
 import math
 import re
 from datetime import datetime
+from PIL import Image
 
 # 1. PAGE CONFIG
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
@@ -24,10 +25,13 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("Atmospheric Risk Management")
-st.caption("Vector Check Aerial Group Inc. | Specialized Drone Operations & Weather Consulting")
+# 2. SIDEBAR & LOGO
+try:
+    logo = Image.open("VCAG Inc - Logo Final.jpg")
+    st.sidebar.image(logo, use_container_width=True)
+except FileNotFoundError:
+    st.sidebar.warning("Logo file not found. Place 'VCAG Inc - Logo Final.jpg' in the script directory.")
 
-# 2. SIDEBAR
 st.sidebar.header("Mission Parameters")
 lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f")
@@ -57,15 +61,13 @@ def get_best_upper_wind(h_data, idx):
 def estimate_tactical_visibility(temp, rh, weather_code):
     """Multi-factor Visibility Estimation for Vector Check"""
     if temp is None or rh is None: return 10.0
-    # 1. Base from Dewpoint Depression
     dp_dep = (100 - rh) / 5
     vis_est = max(0.1, dp_dep * 1.13)
-    # 2. Precipitation Extinction
     if weather_code is not None:
-        if weather_code in [65, 66, 67, 95]: vis_est = min(vis_est, 1.5) # Heavy Rain/FZRA
-        elif weather_code in [73, 75, 85, 86]: vis_est = min(vis_est, 0.75) # Moderate/Heavy Snow
-        elif weather_code in [51, 61, 80, 71]: vis_est = min(vis_est, 4.0) # Light Precip
-        elif weather_code in [45, 48]: vis_est = min(vis_est, 0.25) # Fog
+        if weather_code in [65, 66, 67, 95]: vis_est = min(vis_est, 1.5)
+        elif weather_code in [73, 75, 85, 86]: vis_est = min(vis_est, 0.75)
+        elif weather_code in [51, 61, 80, 71]: vis_est = min(vis_est, 4.0)
+        elif weather_code in [45, 48]: vis_est = min(vis_est, 0.25)
     return min(10.0, vis_est)
 
 # 4. DATA FETCHING
@@ -132,6 +134,9 @@ def highlight_aviation_weather(text):
     return text
 
 # 5. MAIN RENDER
+st.title("Atmospheric Risk Management")
+st.caption("Vector Check Aerial Group Inc. | Specialized Drone Operations & Weather Consulting")
+
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar_raw, taf_raw = get_aviation_weather(icao)
 metar_h = highlight_aviation_weather(metar_raw)
@@ -154,7 +159,6 @@ if data and "hourly" in data:
     selected_time = st.sidebar.select_slider("Forecast Hour:", options=times)
     idx = times.index(selected_time)
     
-    # --- METRIC CALCULATIONS ---
     def get_precip_only(code):
         precip_codes = {51: "Drizzle", 53: "Drizzle", 55: "Drizzle", 56: "FZ Drizzle", 57: "FZ Drizzle",
                         61: "Rain", 63: "Rain", 65: "Rain", 66: "FZ Rain", 67: "FZ Rain",
@@ -169,13 +173,9 @@ if data and "hourly" in data:
     w_spd = h['wind_speed_10m'][idx]
     wx_code = h['weather_code'][idx]
     
-    # 3-Digit Wind Direction
     w_dir_display = str(int(w_dir_raw)).zfill(3) if w_dir_raw is not None else "N/A"
-    
-    # Tactical Visibility Estimate (SM)
     vis_sm = estimate_tactical_visibility(temp, hum, wx_code)
     
-    # Freezing Altitude (SFC Logic)
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
     if temp is not None and temp <= 0:
         frz_display = "SFC"
@@ -185,10 +185,8 @@ if data and "hourly" in data:
     else:
         frz_display = "N/A"
     
-    # Cloud Base Estimation (Standard Lapse)
     c_base = "Clear" if hum < 55 else f"{int(round((temp - (temp - ((100 - hum)/5))) * 122 * 3.28084, -2))} ft"
 
-    # Render Metric Row
     cols = st.columns(8)
     cols[0].metric("Temp", f"{safe_val(temp, precision=1)}°C")
     cols[1].metric("RH", f"{safe_val(hum)}%")
@@ -199,7 +197,6 @@ if data and "hourly" in data:
     cols[6].metric("Freezing Alt", frz_display)
     cols[7].metric("Cloud", c_base)
 
-    # --- HAZARD STACK ---
     st.subheader("Tactical Hazard Stack")
     gst = h['wind_gusts_10m'][idx]
     upper_v, upper_h = get_best_upper_wind(h, idx)
@@ -219,7 +216,6 @@ if data and "hourly" in data:
     else:
         st.warning("Upper-air data unavailable for this hour.")
 
-    # --- SKEW-T ---
     st.divider()
     p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     t_plot = [h.get(f'temperature_{p}hPa')[idx] for p in p_levs]
