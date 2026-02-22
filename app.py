@@ -23,7 +23,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("Actuals")
+st.title("Atmospheric Risk Management")
 st.caption("")
 
 # 2. SIDEBAR
