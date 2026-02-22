@@ -48,7 +48,7 @@ model_api_map = {
     "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/ecmwf"
 }
 
-# 3. HIGHLIGHTING LOGIC
+# 3. HELPERS & HIGHLIGHTING LOGIC
 def apply_tactical_highlights(text):
     if not text: return ""
     
@@ -85,6 +85,21 @@ def apply_tactical_highlights(text):
     text = re.sub(r'\b(BKN|OVC|VV)(\d{3})\b', sky_match, text)
     
     return text
+
+def get_precip_type(code):
+    """Maps Open-Meteo WMO weather codes to plain text precipitation types."""
+    if code is None: return "N/A"
+    if code in [0, 1, 2, 3, 45, 48]: return "None"
+    if code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95]: return "Rain"
+    if code in [56, 57, 66, 67]: return "Freezing Rain"
+    if code in [71, 73, 75, 77, 85, 86]: return "Snow"
+    if code in [96, 99]: return "Hail"
+    return "Mixed"
+
+def safe_val(val, multiplier=1, default="N/A", precision=0):
+    if val is None: return default
+    res = val * multiplier
+    return f"{res:,.{precision}f}" if precision > 0 else f"{int(round(res)):,}"
 
 # 4. DATA FETCHING
 @st.cache_data(ttl=300)
@@ -140,11 +155,6 @@ def fetch_mission_data(latitude, longitude, model_url, time_key):
         return res.json()
     except: return None
 
-def safe_val(val, multiplier=1, default="N/A", precision=0):
-    if val is None: return default
-    res = val * multiplier
-    return f"{res:,.{precision}f}" if precision > 0 else f"{int(round(res)):,}"
-
 # 5. MAIN RENDER
 st.title("Atmospheric Risk Management")
 st.caption("Vector Check Aerial Group Inc. | Specialized Drone Operations & Weather Consulting")
@@ -153,9 +163,10 @@ current_hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
 data = fetch_mission_data(lat, lon, model_api_map[model_choice], current_hour_key)
 metar_raw, taf_raw = get_aviation_weather(icao)
 
+# Removed monospace font to match the hazard stack's default sans-serif Streamlit font
 st.markdown(f"""
-    <div style="background-color: #1B1E23; padding: 15px; border: 1px solid #2D3139; border-radius: 5px; font-family: monospace; color: #D1D5DB; font-size: 0.85rem; line-height: 1.5;">
-        <strong style="color: #8E949E; text-transform: uppercase; font-family: sans-serif;">Observations (Last 3)</strong><br>
+    <div style="background-color: #1B1E23; padding: 15px; border: 1px solid #2D3139; border-radius: 5px; color: #D1D5DB; font-size: 0.9rem; line-height: 1.5;">
+        <strong style="color: #8E949E; text-transform: uppercase; font-family: sans-serif;">METAR/SPECI</strong><br>
         {metar_raw}<br><br>
         <strong style="color: #8E949E; text-transform: uppercase; font-family: sans-serif;">TAF</strong><br>
         {taf_raw}
@@ -179,15 +190,16 @@ if data and "hourly" in data:
     
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
     frz_display = "SFC" if temp is not None and temp <= 0 else (f"{int(round(frz_raw * 3.28084, -2)):,} ft" if frz_raw else "N/A")
+    precip_type_str = get_precip_type(wx_code)
     
     cols = st.columns(8)
     cols[0].metric("Temp", f"{temp}°C")
     cols[1].metric("RH", f"{hum}%")
     cols[2].metric("Wind Dir", f"{w_dir_display}°")
     cols[3].metric("Wind Spd", f"{int(w_spd)} kt" if w_spd is not None else "N/A")
-    cols[4].metric("Wx Code", f"{wx_code}")
+    cols[4].metric("Precip Type", precip_type_str)
     cols[5].metric("Vis (Est)", f"{int((100 - hum) / 5 * 1.13)} sm" if hum is not None else "N/A")
-    cols[6].metric("Freezing", frz_display)
+    cols[6].metric("Freezing LVL", frz_display)
     
     if temp is not None and hum is not None:
         c_base = f"{int((temp - (temp - ((100-hum)/5)))*122*3.28)} ft"
