@@ -140,12 +140,14 @@ if data and "hourly" in data:
     selected_time = st.sidebar.select_slider("Forecast Hour:", options=times)
     idx = times.index(selected_time)
     
-    # --- METRIC ROW CALCULATIONS ---
+    # --- HARDENED METRIC ROW CALCULATIONS ---
     def get_wx_desc(code):
+        if code is None: return "N/A"
         codes = {0: "Clear", 1: "Mainly Clear", 2: "Partly Cloudy", 3: "Overcast", 45: "Fog", 48: "Dep Fog", 51: "Drizzle", 56: "FZ Drizzle", 61: "Rain", 66: "FZ Rain", 71: "Snow", 77: "Snow Grains", 80: "Showers", 85: "Snow Showers", 95: "TS"}
         return codes.get(code, "Clear")
 
     def estimate_cloud_base(t, rh):
+        if t is None or rh is None: return "N/A"
         if rh < 55: return "Clear"
         base_ft = (t - (t - ((100 - rh)/5))) * 122 * 3.28084
         return f"{int(round(base_ft, -2))} ft"
@@ -155,16 +157,22 @@ if data and "hourly" in data:
     w_dir = h['wind_direction_10m'][idx]
     w_spd = h['wind_speed_10m'][idx]
     wx_code = h['weather_code'][idx]
-    vis = h['visibility'][idx] * 0.001
-    frz = h['freezing_level_height'][idx] * 3.28084
+    
+    # Safety checks for visibility and freezing level
+    vis_raw = h.get('visibility', [None]*len(h['time']))[idx]
+    vis = (vis_raw * 0.001) if vis_raw is not None else None
+    
+    frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
+    frz = (frz_raw * 3.28084) if frz_raw is not None else None
+    
     c_base = estimate_cloud_base(temp, hum)
 
     # Render 8-Column Metric Row
     cols = st.columns(8)
     cols[0].metric("TEMP", f"{safe_val(temp, precision=1)}°C")
     cols[1].metric("RH", f"{safe_val(hum)}%")
-    cols[2].metric("WIND DIR", f"{int(w_dir)}°")
-    cols[3].metric("WIND SPD", f"{int(w_spd)} kt")
+    cols[2].metric("WIND DIR", f"{safe_val(w_dir)}°")
+    cols[3].metric("WIND SPD", f"{safe_val(w_spd)} kt")
     cols[4].metric("PRECIP", get_wx_desc(wx_code))
     cols[5].metric("VIS", f"{safe_val(vis, precision=1)} km")
     cols[6].metric("FRZ LVL", f"{safe_val(frz)} ft")
@@ -175,7 +183,7 @@ if data and "hourly" in data:
     gst = h['wind_gusts_10m'][idx]
     upper_v, upper_h = get_best_upper_wind(h, idx)
     
-    if w_spd is not None and upper_v is not None:
+    if w_spd is not None and upper_v is not None and gst is not None:
         stack = []
         gst_factor = gst / max(w_spd, 1)
         for alt in [400, 300, 200, 100]:
@@ -188,7 +196,7 @@ if data and "hourly" in data:
             stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
         st.table(pd.DataFrame(stack))
     else:
-        st.warning("Upper-air data unavailable for this coordinate.")
+        st.warning("Upper-air data or surface wind data unavailable for this hour.")
 
     # --- SKEW-T ---
     st.divider()
