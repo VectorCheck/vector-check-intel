@@ -23,7 +23,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🛡️ Vector Check: High-Res Airspace Intelligence")
+st.title("Vector Check: High-Res Airspace Intelligence")
 st.caption("TACTICAL PLANNING: HRDPS (2.5km) & ECMWF (9km) INTEGRATED")
 
 # 2. SIDEBAR
@@ -87,7 +87,7 @@ def get_aviation_weather(station):
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar, taf = get_aviation_weather(icao)
 
-st.subheader(f"📡 {model_choice} Analysis + {icao} Text")
+st.subheader(f"{model_choice} Analysis + {icao} Text")
 c1, c2 = st.columns(2)
 c1.code(metar, language="text")
 c2.code(taf, language="text")
@@ -110,7 +110,7 @@ if data and "hourly" in data:
     m4.metric("VISIBILITY", f"{safe_val(h['visibility'][idx], 0.001, precision=1)} km")
 
     # --- HAZARD STACK ---
-    st.subheader("📊 Tactical Hazard Stack (Estimated AGL Winds)")
+    st.subheader("Tactical Hazard Stack (Estimated AGL Winds)")
     upper_v, upper_h = get_best_upper_wind(h, idx)
     
     if w10 is not None and upper_v is not None:
@@ -121,9 +121,9 @@ if data and "hourly" in data:
             spd = w10 + (upper_v - w10) * (math.log(alt_m/10) / math.log(upper_h/10))
             cur_gst = spd * gst_factor
             
-            status = "🟢 NOMINAL"
-            if cur_gst > 25: status = "🔴 NO-GO (GUST)"
-            elif spd > 20: status = "🟡 CAUTION (WIND)"
+            status = "NOMINAL"
+            if cur_gst > 25: status = "NO-GO (GUST)"
+            elif spd > 20: status = "CAUTION (WIND)"
             
             stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
         st.table(pd.DataFrame(stack))
