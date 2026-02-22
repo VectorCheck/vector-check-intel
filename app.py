@@ -2,9 +2,6 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from metpy.plots import SkewT
-from metpy.units import units
 import math
 import re
 from datetime import datetime, timezone
@@ -81,7 +78,7 @@ def get_precip_type(code):
 
 # 4. ICING LOGIC
 def calculate_icing_profile(hourly_data, idx, wx_code):
-    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
+    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
     profile = []
     for p in p_levels:
         t = hourly_data.get(f"temperature_{p}hPa")[idx]
@@ -168,7 +165,7 @@ def get_aviation_weather(station):
 
 @st.cache_data(ttl=600)
 def fetch_mission_data(lat, lon, model_url):
-    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200]
+    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
     hourly = ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_direction_10m", "weather_code", "freezing_level_height"]
     
     if "gem" in model_url: 
@@ -320,59 +317,3 @@ if data and "hourly" in data:
             "Icing": ice_final
         })
     st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
-
-    st.divider()
-    
-    # --- SKEW-T LOG-P DIAGRAM (WINDY STYLE) ---
-    p_levs_plot = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200]
-    t_plot = [h.get(f'temperature_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
-    td_plot = [h.get(f'dewpoint_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
-    ws_plot = [h.get(f'wind_speed_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
-    wd_plot = [h.get(f'wind_direction_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
-    
-    if all(v is not None for v in t_plot):
-        st.markdown("<h3 style='color: white;'>Sounding Forecast</h3>", unsafe_allow_html=True)
-        
-        fig = plt.figure(figsize=(9, 9))
-        fig.patch.set_facecolor('#222222')
-        skew = SkewT(fig, rotation=45)
-        skew.ax.set_facecolor('#222222')
-        
-        # Wind Barbs Calculation
-        u_plot, v_plot, barb_p = [], [], []
-        for p_val, ws_val, wd_val in zip(p_levs_plot, ws_plot, wd_plot):
-            if ws_val is not None and wd_val is not None:
-                u_plot.append(-ws_val * np.sin(np.radians(wd_val)))
-                v_plot.append(-ws_val * np.cos(np.radians(wd_val)))
-                barb_p.append(p_val)
-        
-        # Plot T and Td
-        skew.plot(p_levs_plot, np.array(t_plot) * units.degC, '#e74c3c', linewidth=2.5) # Red T
-        skew.plot(p_levs_plot, np.array(td_plot) * units.degC, '#3498db', linewidth=2.5) # Blue Td
-        
-        # Plot Barbs
-        if u_plot:
-            skew.plot_barbs(barb_p, np.array(u_plot) * units.knots, np.array(v_plot) * units.knots, color='white', length=6)
-            
-        # Graph Styling & Limits
-        skew.ax.set_ylim(1000, 200)
-        skew.ax.set_xlim(-40, 40)
-        skew.ax.axvline(0, color='#B976AC', linestyle='--', linewidth=1.5, alpha=0.8) # 0C Isotherm
-        
-        skew.plot_dry_adiabats(t0=np.arange(233, 533, 10) * units.K, alpha=0.25, color='#e67e22', linestyles='dashed')
-        skew.plot_moist_adiabats(t0=np.arange(233, 323, 5) * units.K, alpha=0.25, color='#27ae60', linestyles='dashed')
-        skew.plot_mixing_lines(alpha=0.2, color='#8e44ad', linestyles='dotted')
-        
-        skew.ax.tick_params(axis='both', colors='white', labelsize=10)
-        for spine in skew.ax.spines.values():
-            spine.set_color('#555555')
-            
-        skew.ax.set_ylabel('hPa', color='white')
-        skew.ax.set_xlabel('°C', color='white')
-        
-        # Approximations for visual metadata
-        if t is not None and td is not None:
-            lcl_approx = 400 * (t - rh) if rh else 1000 # Rough LCL
-            plt.figtext(0.12, 0.05, f"lcl (est): {int(lcl_approx)}ft   elevation: {int(lat*10)}ft", color='#A0A4AB', fontsize=11)
-
-        st.pyplot(fig)
