@@ -183,4 +183,200 @@ def fetch_mission_data(lat, lon, model_url):
               
     params = {"latitude": lat, "longitude": lon, "hourly": hourly, "wind_speed_unit": "kn", "forecast_hours": 48, "timezone": "UTC"}
     res = requests.get(model_url, params=params)
-    if res.status_
+    if res.status_code == 200:
+        return res.json(), None
+    else:
+        return None, res.text
+
+# 6. RENDER
+st.title("Atmospheric Risk Management")
+st.caption("Vector Check Aerial Group Inc.")
+
+data, error_msg = fetch_mission_data(lat, lon, model_api_map[model_choice])
+metar_raw, taf_raw = get_aviation_weather(icao)
+
+st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E; font-family: sans-serif;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E; font-family: sans-serif;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
+st.divider()
+
+if error_msg:
+    st.error(f"⚠️ TARGET DATA STREAM FAILED: The atmospheric model rejected the parameter request. Diagnostic: {error_msg}")
+elif data and "hourly" in data:
+    h = data["hourly"]
+    times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in h["time"]]
+    selected_time = st.sidebar.select_slider("Forecast Hour:", options=times, value=times[0])
+    idx = times.index(selected_time)
+    
+    t, rh, w_spd, wx = h['temperature_2m'][idx], h['relative_humidity_2m'][idx], h['wind_speed_10m'][idx], h['weather_code'][idx]
+    sfc_dir = int(h['wind_direction_10m'][idx])
+    frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
+    frz_display = "SFC" if t <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
+    c_base_ft = int((t - (t - ((100-rh)/5)))*400) if rh else 10000
+
+    c = st.columns(8)
+    c[0].metric("Temp", f"{t}°C"); c[1].metric("RH", f"{rh}%"); c[2].metric("Wind Dir", f"{sfc_dir:03d}°")
+    c[3].metric("Wind Spd", f"{int(w_spd)} kt"); c[4].metric("Precip Type", get_precip_type(wx))
+    c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm"); c[6].metric("Freezing LVL", frz_display)
+    c[7].metric("Cloud Base", f"{c_base_ft} ft")
+
+    # PREPARE CORE VARIABLES
+    raw_gust = h.get('wind_gusts_10m', [w_spd]*len(h['time']))[idx]
+    gst = (w_spd * 1.25) if raw_gust <= w_spd else raw_gust
+    
+    if h.get('wind_speed_120m') and h['wind_speed_120m'][idx] is not None:
+        upper_v, upper_dir, upper_h = h['wind_speed_120m'][idx], h['wind_direction_120m'][idx], 120
+    else:
+        upper_v, upper_dir, upper_h = h.get('wind_speed_100m', [w_spd*1.5])[idx], h.get('wind_direction_100m', [sfc_dir])[idx], 100
+    
+    icing_cond = calculate_icing_profile(h, idx, wx)
+    t_950 = h.get('temperature_950hPa', [t])[idx]
+    is_stable = t_950 is not None and t_950 > (t - 2.0)
+
+    # --- TABLE 1: TACTICAL BOUNDARY LAYER (0-400ft) ---
+    st.subheader("Tactical Hazard Stack (0-400ft AGL)")
+    stack_tactical = []
+    for alt in [400, 300, 200, 100]:
+        spd = w_spd + (upper_v - w_spd) * (math.log(alt*0.3048/10) / math.log(upper_h/10))
+        cur_gst = spd * (gst / max(w_spd, 1))
+        
+        diff = (upper_dir - sfc_dir + 180) % 360 - 180
+        dir_val = (sfc_dir + diff * (min(alt*0.3048, upper_h) / upper_h)) % 360
+
+        max_w = max(spd, cur_gst)
+        shear_kt = spd - w_spd
+        shear_per_1000 = (shear_kt / alt) * 1000 if alt > 0 else 0
+        
+        if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
+        elif is_stable and shear_per_1000 >= 20: turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 40 else "MDT")
+        else:
+            turb_type = "MECH"
+            if max_w < 15: turb_sev = "NONE"
+            elif max_w < 20: turb_sev = "LGT"
+            elif max_w < 25: turb_sev = "MOD" if terrain_type == "Mountains" else "LGT"
+            elif max_w < 35: turb_sev = "LGT" if terrain_type == "Water" else "MOD"
+            elif max_w < 40: turb_sev = "MOD" if terrain_type == "Water" else ("MOD-SEV" if terrain_type == "Land" else "SEV")
+            else: turb_sev = "MOD-SEV" if terrain_type == "Water" else "SEV"
+        turb_final = "NONE" if turb_sev == "NONE" else f"{turb_sev} {turb_type}"
+
+        ice_final = "NONE"
+        if icing_cond["base"] <= alt <= icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
+        elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
+
+        stack_tactical.append({
+            "Alt (AGL)": f"{alt}ft", 
+            "Dir": f"{int(dir_val):03d}°",
+            "Spd (kt)": int(spd), 
+            "Gust (kt)": int(cur_gst), 
+            "Turbulence": turb_final,
+            "Icing": ice_final
+        })
+    st.table(pd.DataFrame(stack_tactical).set_index("Alt (AGL)"))
+
+    # --- TABLE 2: EXTENDED TRAJECTORY (1000-5000ft) ---
+    st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
+    
+    p_levels_traj = [1000, 950, 925, 900, 850, 800, 700, 600]
+    p_profile = []
+    for p in p_levels_traj:
+        ws, wd, gh = h.get(f'wind_speed_{p}hPa'), h.get(f'wind_direction_{p}hPa'), h.get(f'geopotential_height_{p}hPa')
+        if ws and wd and gh and ws[idx] is not None and wd[idx] is not None and gh[idx] is not None:
+            p_profile.append({'h_ft': gh[idx] * 3.28084, 'spd': ws[idx], 'dir': wd[idx]})
+    p_profile = sorted(p_profile, key=lambda x: x['h_ft'])
+
+    stack_ext = []
+    for alt in [5000, 4000, 3000, 2000, 1000]:
+        pts = [{'h_ft': upper_h * 3.28084, 'spd': upper_v, 'dir': upper_dir}] + p_profile
+        below, above = pts[0], pts[-1]
+        for i in range(len(pts)-1):
+            if pts[i]['h_ft'] <= alt <= pts[i+1]['h_ft']:
+                below, above = pts[i], pts[i+1]
+                break
+        
+        if below['h_ft'] == above['h_ft']:
+            spd, dir_val = below['spd'], below['dir']
+        else:
+            fraction = max(0, min(1, (alt - below['h_ft']) / (above['h_ft'] - below['h_ft'])))
+            spd = below['spd'] + fraction * (above['spd'] - below['spd'])
+            diff = (above['dir'] - below['dir'] + 180) % 360 - 180
+            dir_val = (below['dir'] + diff * fraction) % 360
+        
+        cur_gst = spd + (max(0, gst - w_spd) * math.exp(-alt / 1500))
+
+        max_w = max(spd, cur_gst)
+        shear_per_1000 = ((spd - upper_v) / alt) * 1000 if alt > 0 else 0
+        if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
+        elif is_stable and shear_per_1000 >= 15: turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 30 else "MDT")
+        else:
+            turb_type = "MECH"
+            if max_w < 20: turb_sev = "NONE"
+            elif max_w < 30: turb_sev = "LGT"
+            elif max_w < 45: turb_sev = "MOD"
+            else: turb_sev = "SEV"
+        turb_final = "NONE" if turb_sev == "NONE" else f"{turb_sev} {turb_type}"
+
+        ice_final = "NONE"
+        if icing_cond["base"] <= alt <= icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
+        elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
+
+        stack_ext.append({
+            "Alt (AGL)": f"{alt}ft", 
+            "Dir": f"{int(dir_val):03d}°",
+            "Spd (kt)": int(spd), 
+            "Gust (kt)": int(cur_gst), 
+            "Turbulence": turb_final,
+            "Icing": ice_final
+        })
+    st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
+
+    st.divider()
+    
+    # --- SKEW-T LOG-P DIAGRAM (PREDICTIVE VISUALIZATION) ---
+    p_levs_plot = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
+    t_plot = [h.get(f'temperature_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
+    td_plot = [h.get(f'dewpoint_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
+    ws_plot = [h.get(f'wind_speed_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
+    wd_plot = [h.get(f'wind_direction_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
+    
+    if all(v is not None for v in t_plot):
+        fig = plt.figure(figsize=(9, 9))
+        fig.patch.set_facecolor('#222222')
+        skew = SkewT(fig, rotation=45)
+        skew.ax.set_facecolor('#222222')
+        
+        # Wind Barbs Calculation
+        u_plot, v_plot, barb_p = [], [], []
+        for p_val, ws_val, wd_val in zip(p_levs_plot, ws_plot, wd_plot):
+            if ws_val is not None and wd_val is not None:
+                u_plot.append(-ws_val * np.sin(np.radians(wd_val)))
+                v_plot.append(-ws_val * np.cos(np.radians(wd_val)))
+                barb_p.append(p_val)
+        
+        # Plot T and Td
+        skew.plot(p_levs_plot, np.array(t_plot) * units.degC, '#e74c3c', linewidth=2.5) # Red T
+        skew.plot(p_levs_plot, np.array(td_plot) * units.degC, '#3498db', linewidth=2.5) # Blue Td
+        
+        # Plot Barbs
+        if u_plot:
+            skew.plot_barbs(barb_p, np.array(u_plot) * units.knots, np.array(v_plot) * units.knots, color='white', length=6)
+            
+        # Graph Styling & Limits capped at 400hPa
+        skew.ax.set_ylim(1000, 400)
+        skew.ax.set_xlim(-40, 40)
+        skew.ax.axvline(0, color='#B976AC', linestyle='--', linewidth=1.5, alpha=0.8) # 0C Isotherm
+        
+        skew.plot_dry_adiabats(t0=np.arange(233, 533, 10) * units.K, alpha=0.25, color='#e67e22', linestyles='dashed')
+        skew.plot_moist_adiabats(t0=np.arange(233, 323, 5) * units.K, alpha=0.25, color='#27ae60', linestyles='dashed')
+        skew.plot_mixing_lines(alpha=0.2, color='#8e44ad', linestyles='dotted')
+        
+        skew.ax.tick_params(axis='both', colors='white', labelsize=10)
+        for spine in skew.ax.spines.values():
+            spine.set_color('#555555')
+            
+        skew.ax.set_ylabel('hPa', color='white')
+        skew.ax.set_xlabel('°C', color='white')
+        
+        # Approximations for visual metadata
+        if t is not None and td is not None:
+            lcl_approx = 400 * (t - rh) if rh else 1000 # Rough LCL
+            plt.figtext(0.12, 0.05, f"lcl (est): {int(lcl_approx)}ft   elevation: {int(lat*10)}ft", color='#A0A4AB', fontsize=11)
+
+        st.pyplot(fig)
