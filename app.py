@@ -200,7 +200,7 @@ if data and "hourly" in data:
     cols[7].metric("Cloud", c_base)
 
     # --- HAZARD STACK ---
-    st.subheader("Tactical Hazard Stack (Estimated AGL Winds)")
+    st.subheader("Tactical Hazard Stack")
     gst = h['wind_gusts_10m'][idx]
     upper_v, upper_h = get_best_upper_wind(h, idx)
     
