@@ -11,7 +11,7 @@ from datetime import datetime
 # 1. PAGE CONFIG & UI LOCK
 st.set_page_config(page_title="Vector Check: Mission Intel", layout="wide")
 
-# CUSTOM CSS: Font sizes and global table centering
+# CUSTOM CSS: Font sizes and global table centering with HIGH CONTRAST headers
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
@@ -20,16 +20,35 @@ st.markdown("""
     .centered-table {
         display: flex;
         justify-content: center;
+        margin-bottom: 20px;
     }
     
     table {
         margin-left: auto;
         margin-right: auto;
         text-align: center !important;
-        width: 80%;
+        width: 90%;
+        border-collapse: collapse;
     }
-    th { text-align: center !important; background-color: #f0f2f6; }
-    td { text-align: center !important; }
+    
+    /* FORCE HEADER VISIBILITY: Dark text on Grey background */
+    th { 
+        text-align: center !important; 
+        background-color: #f0f2f6 !important; 
+        color: #1f1f1f !important;           
+        font-weight: bold !important;
+        padding: 10px !important;
+        border: 1px solid #dee2e6 !important;
+    }
+    
+    /* FORCE CELL VISIBILITY: Dark text on White background */
+    td { 
+        text-align: center !important; 
+        padding: 8px !important;
+        color: #1f1f1f !important;
+        background-color: #ffffff !important;
+        border: 1px solid #dee2e6 !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -144,11 +163,12 @@ if data and "hourly" in data:
     
     df_stack = pd.DataFrame(stack_data).iloc[::-1]
     styler = df_stack.style.set_properties(**{'text-align': 'center'}).hide(axis='index')
+    
     st.markdown('<div class="centered-table">', unsafe_allow_html=True)
     st.write(styler.to_html(), unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- ADIABATIC SOUNDING PROFILE (LEGEND UPDATED) ---
+    # --- ADIABATIC SOUNDING PROFILE ---
     st.divider()
     st.subheader(f"🌡️ Deep Synoptic Ribbon (Convection & Adiabats)")
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
@@ -158,29 +178,21 @@ if data and "hourly" in data:
     fig = plt.figure(figsize=(10, 35)) 
     skew = SkewT(fig, rotation=45)
     
-    # 1. Adiabatic Reference Lines
     skew.plot_dry_adiabats(color='orange', alpha=0.3, linewidth=1, linestyle='--')
     skew.plot_moist_adiabats(color='blue', alpha=0.3, linewidth=1, linestyle='--')
-    
-    # 2. Saturation Shading (Yellow)
     skew.ax.fill_betweenx(p_levels, t_vals, td_vals, where=((t_vals - td_vals) <= 2), color='yellow', alpha=0.3)
     
-    # 3. Plot Primary Lines
     skew.plot(p_levels, t_vals * units.degC, 'r', linewidth=5, label='Temp')
     skew.plot(p_levels, td_vals * units.degC, 'g', linewidth=5, label='Dewpt')
     
-    # 4. Custom Altitude Labels
     for alt_label in [1000, 3000, 5000, 10000, 15000, 20000]:
         p_val = h_to_p(alt_label)
         skew.ax.text(-38.5, p_val, f"{alt_label:,} ft", color='blue', fontsize=16, fontweight='bold', ha='right')
         skew.ax.axhline(p_val, color='blue', alpha=0.15, linestyle='-')
             
-    # 5. Freezing Line
     skew.ax.axvline(0, color='cyan', linestyle='-', alpha=0.6, linewidth=3)
     
     plt.ylim(1050, 400); plt.xlim(-40, 40)
-    
-    # REDUCED LEGEND SIZE
     plt.legend(loc='upper right', prop={'size': 12})
     
     buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', dpi=130)
