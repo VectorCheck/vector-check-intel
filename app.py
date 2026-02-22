@@ -71,7 +71,7 @@ def estimate_tactical_visibility(temp, rh, weather_code):
         elif weather_code in [45, 48]: vis_est = min(vis_est, 0.25)
     return min(10.0, vis_est)
 
-# 4. DATA FETCHING (48-Hour Tactical Window)
+# 4. DATA FETCHING (Multi-Report Logic)
 @st.cache_data(ttl=600)
 def fetch_mission_data(latitude, longitude, model_url, time_key):
     hourly_params = [
@@ -82,15 +82,9 @@ def fetch_mission_data(latitude, longitude, model_url, time_key):
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     hourly_params += [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels]
     
-    # NEW: forecast_hours=48 and past_hours=0 starts exactly AT THE CURRENT HOUR
     params = {
-        "latitude": latitude, 
-        "longitude": longitude, 
-        "hourly": hourly_params, 
-        "wind_speed_unit": "kn", 
-        "forecast_hours": 48, 
-        "past_hours": 0, 
-        "timezone": "UTC"
+        "latitude": latitude, "longitude": longitude, "hourly": hourly_params, 
+        "wind_speed_unit": "kn", "forecast_hours": 48, "past_hours": 0, "timezone": "UTC"
     }
     try:
         res = requests.get(model_url, params=params, timeout=15)
@@ -102,18 +96,33 @@ def fetch_mission_data(latitude, longitude, model_url, time_key):
 def get_aviation_weather(station):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
-        m_url = f"https://aviationweather.gov/api/data/metar?ids={station}"
+        # Requesting the last 3 reports to capture SPECIs
+        m_url = f"https://aviationweather.gov/api/data/metar?ids={station}&hours=3"
         t_url = f"https://aviationweather.gov/api/data/taf?ids={station}"
+        
         m_res = requests.get(m_url, headers=headers, timeout=10)
         t_res = requests.get(t_url, headers=headers, timeout=10)
-        metar = m_res.text.strip() if m_res.status_code == 200 else f"Error {m_res.status_code}"
-        taf = t_res.text.strip() if t_res.status_code == 200 else f"Error {t_res.status_code}"
-        return metar or "No METAR", taf or "No TAF"
+        
+        # Process METAR/SPECI list
+        metars = m_res.text.strip().split('\n')
+        # Filter out empty strings and take only the top 3
+        metars = [m for m in metars if m][:3]
+        
+        final_metar = "<br>".join(metars) if metars else "STATION INACTIVE / NO DATA"
+        taf = t_res.text.strip() if t_res.status_code == 200 and t_res.text.strip() else "NO ACTIVE TAF"
+        
+        return final_metar, taf
     except Exception:
-        return "Conn Error", "Conn Error"
+        return "CONNECTION ERROR", "CONNECTION ERROR"
 
 def highlight_aviation_weather(text):
-    if "Error" in text: return f"<span style='color: #ff4b4b;'>{text} - Check Station ID</span>"
+    if "INACTIVE" in text or "CONNECTION" in text: 
+        return f"<span style='color: #A0A4AB; font-style: italic;'>{text}</span>"
+    
+    # Highlight logic for SPECI and METAR markers
+    text = text.replace("SPECI", '<span style="color: #E58E26; font-weight: bold;">SPECI</span>')
+    text = text.replace("METAR", '<span style="color: #8E949E; font-weight: bold;">METAR</span>')
+
     def vis_replacer(match):
         val_str = match.group(1)
         try:
@@ -122,6 +131,7 @@ def highlight_aviation_weather(text):
             if val <= 5: return f'<span style="color: #f6ec15; font-weight: bold;">{match.group(0)}</span>'
         except: pass
         return match.group(0)
+
     def cloud_replacer(match):
         try:
             height = int(match.group(2)) * 100
@@ -129,11 +139,13 @@ def highlight_aviation_weather(text):
             if height <= 3000: return f'<span style="color: #f6ec15; font-weight: bold;">{match.group(0)}</span>'
         except: pass
         return match.group(0)
+
     def wx_replacer(match):
         code = match.group(0)
         if any(x in code for x in ['FZ', 'PL', 'IC', '+']): return f'<span style="color: #ff4b4b; font-weight: bold;">{code}</span>'
         if any(x in code for x in ['FG', 'BR']): return f'<span style="color: #f6ec15; font-weight: bold;">{code}</span>'
         return code
+
     text = re.sub(r'(\d+/\d+|\d+)SM', vis_replacer, text)
     text = re.sub(r'(BKN|OVC|VV)(\d{3})', cloud_replacer, text)
     text = re.sub(r'\b(?:\+|-|VC)?(?:FZ|PL|IC|FG|BR|RA|SN|DZ|GR|GS|UP)+\b', wx_replacer, text)
@@ -143,7 +155,6 @@ def highlight_aviation_weather(text):
 st.title("Atmospheric Risk Management")
 st.caption("Vector Check Aerial Group Inc. | Specialized Drone Operations & Weather Consulting")
 
-# Time-based key for hourly caching
 current_hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
 data = fetch_mission_data(lat, lon, model_api_map[model_choice], current_hour_key)
 
@@ -152,8 +163,8 @@ metar_h = highlight_aviation_weather(metar_raw)
 taf_h = highlight_aviation_weather(taf_raw).replace('TAF ', 'TAF<br>').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')
 
 st.markdown(f"""
-    <div style="background-color: #1B1E23; padding: 15px; border: 1px solid #2D3139; border-radius: 5px; font-family: sans-serif; color: #D1D5DB; font-size: 0.9rem; line-height: 1.6;">
-        <strong style="color: #8E949E; text-transform: uppercase;">METAR</strong><br>
+    <div style="background-color: #1B1E23; padding: 15px; border: 1px solid #2D3139; border-radius: 5px; font-family: sans-serif; color: #D1D5DB; font-size: 0.85rem; line-height: 1.5;">
+        <strong style="color: #8E949E; text-transform: uppercase;">Observations (Last 3)</strong><br>
         {metar_h}<br><br>
         <strong style="color: #8E949E; text-transform: uppercase;">TAF</strong><br>
         {taf_h}
@@ -164,10 +175,7 @@ st.divider()
 
 if data and "hourly" in data:
     h = data["hourly"]
-    # Timestamps now strictly start from the current hour
     times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in h["time"]]
-    
-    # Slider default is now always the first element (the current hour)
     selected_time = st.sidebar.select_slider("Forecast Hour:", options=times, value=times[0])
     idx = times.index(selected_time)
     
