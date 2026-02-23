@@ -43,10 +43,6 @@ icao = st.sidebar.text_input("Nearest ICAO", value="CYTR").upper().strip()
 model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
 terrain_type = st.sidebar.selectbox("Terrain Roughness:", options=["Land", "Water", "Mountains"])
 
-st.sidebar.divider()
-st.sidebar.caption("API Credentials (Commercial Ops)")
-om_api_key = st.sidebar.text_input("Open-Meteo API Key (Optional)", type="password", help="Input your commercial API key to bypass free-tier rate limits.")
-
 model_api_map = {
     "HRDPS (Canada 2.5km)": "https://api.open-meteo.com/v1/gem",
     "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/ecmwf"
@@ -141,7 +137,7 @@ def calculate_icing_profile(hourly_data, idx, wx_code):
                     break
     return icing_result
 
-# 5. DATA FETCHING (PACE LINKS & COMMERCIAL API HANDLING)
+# 5. DATA FETCHING (PACE LINKS)
 @st.cache_data(ttl=300)
 def get_aviation_weather(station):
     API_KEY = "c453505478304bbbae7761f99c8a84ba" 
@@ -171,7 +167,7 @@ def get_aviation_weather(station):
     except Exception as e: return f"LINK FAILURE: {str(e)[:20]}", "LINK FAILURE"
 
 @st.cache_data(ttl=600)
-def fetch_mission_data(lat, lon, model_url, api_key=None):
+def fetch_mission_data(lat, lon, model_url):
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     hourly = ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_direction_10m", "weather_code", "freezing_level_height"]
     
@@ -185,10 +181,6 @@ def fetch_mission_data(lat, lon, model_url, api_key=None):
               [f"wind_speed_{p}hPa" for p in p_levels] + [f"wind_direction_{p}hPa" for p in p_levels]
               
     params = {"latitude": lat, "longitude": lon, "hourly": hourly, "wind_speed_unit": "kn", "forecast_hours": 48, "timezone": "UTC"}
-    
-    if api_key:
-        params["apikey"] = api_key
-        model_url = model_url.replace("api.open-meteo.com", "customer-api.open-meteo.com")
 
     res = requests.get(model_url, params=params)
     if res.status_code == 200:
@@ -200,7 +192,7 @@ def fetch_mission_data(lat, lon, model_url, api_key=None):
 st.title("Atmospheric Risk Management")
 st.caption("Vector Check Aerial Group Inc.")
 
-data, error_msg = fetch_mission_data(lat, lon, model_api_map[model_choice], om_api_key)
+data, error_msg = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar_raw, taf_raw = get_aviation_weather(icao)
 
 st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E; font-family: sans-serif;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E; font-family: sans-serif;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
@@ -211,14 +203,13 @@ if error_msg:
     st.info("💡 TACTICAL FIX: You have hit the IP-based rate limit for the free tier. The limit resets at 00:00 UTC (7:00 PM EST).")
 elif data and "hourly" in data:
     h = data["hourly"]
-    model_elevation = data.get("elevation", 0) # Pull exact model elevation
+    model_elevation = data.get("elevation", 0) 
     times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in h["time"]]
     selected_time = st.sidebar.select_slider("Forecast Hour:", options=times, value=times[0])
     idx = times.index(selected_time)
     
     t, rh, w_spd, wx = h['temperature_2m'][idx], h['relative_humidity_2m'][idx], h['wind_speed_10m'][idx], h['weather_code'][idx]
     
-    # Calculate surface dewpoint explicitly for the visualization block below
     td = t - ((100 - rh) / 5) if (t is not None and rh is not None) else None
     
     sfc_dir = int(h['wind_direction_10m'][idx])
