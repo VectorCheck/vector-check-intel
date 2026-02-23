@@ -60,7 +60,13 @@ def apply_tactical_highlights(text):
         raw = m.group(0)
         try:
             clean = raw.upper().replace('SM', '').replace('P', '').replace('M', '').strip()
-            val = sum(float(num)/float(den) if '/' in p else float(p) for p in clean.split() for num, den in [p.split('/')] if '/' in p else [0]) if '/' in clean else float(clean)
+            val = 0.0
+            for p in clean.split():
+                if '/' in p:
+                    num, den = p.split('/')
+                    val += float(num) / float(den)
+                else:
+                    val += float(p)
             if val < 3: return f'<span class="ifr-text">{raw}</span>'
             if 3 <= val <= 5: return f'<span class="mvfr-text">{raw}</span>'
         except: pass
