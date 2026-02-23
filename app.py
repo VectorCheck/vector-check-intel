@@ -106,7 +106,9 @@ if data and "hourly" in data:
         d_c = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / u_h)) % 360
         turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond)
         stack_tactical.append({"Alt (AGL)": f"{alt}ft", "Dir": f"{int(d_c):03d}°", "Spd (kt)": int(s_c), "Gust (kt)": int(g_c), "Turbulence": turb, "Icing": ice})
-    st.table(pd.DataFrame(stack_tactical).set_index("Alt (AGL)"))
+    
+    df_tactical = pd.DataFrame(stack_tactical).set_index("Alt (AGL)")
+    st.table(df_tactical)
 
     st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
     p_levels_traj = [1000, 950, 925, 900, 850, 800, 700, 600]
@@ -124,7 +126,19 @@ if data and "hourly" in data:
         d_e = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
         turb, ice = get_turb_ice(alt, s_e, w_spd, s_e, wx, is_stable, icing_cond)
         stack_ext.append({"Alt (AGL)": f"{alt}ft", "Dir": f"{int(d_e):03d}°", "Spd (kt)": int(s_e), "Turbulence": turb, "Icing": ice})
-    st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
+    
+    df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
+    st.table(df_ext)
+
+    # --- CSV EXPORT ENGINE ---
+    df_export = pd.concat([df_tactical, df_ext])
+    csv_data = df_export.to_csv().encode('utf-8')
+    st.download_button(
+        label="📥 Download Pre-Flight Hazard Matrix (CSV)",
+        data=csv_data,
+        file_name=f"VCAG_Hazard_Matrix_{icao}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+    )
 
     # 6. CONVECTIVE PROFILE
     st.divider()
@@ -136,3 +150,12 @@ if data and "hourly" in data:
         st.pyplot(fig)
     else:
         st.warning("Insufficient atmospheric layers available to render vertical profile.")
+
+# 7. LIABILITY ARMOR (DISCLAIMER)
+st.divider()
+st.markdown("""
+<div style="text-align: center; color: #8E949E; font-size: 0.85rem; padding: 20px;">
+<strong>⚠️ FOR SITUATIONAL AWARENESS ONLY</strong><br>
+This system translates raw meteorological model data for uncrewed systems. It does not replace official NAV CANADA or NOAA flight service briefings. The Pilot in Command (PIC) retains ultimate authority and responsibility for flight safety. Vector Check Aerial Group Inc. assumes no liability for operational decisions made using this tool.
+</div>
+""", unsafe_allow_html=True)
