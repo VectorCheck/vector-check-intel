@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from modules.data_ingest import get_aviation_weather, fetch_mission_data
 from modules.hazard_logic import get_precip_type, calculate_icing_profile, get_turb_ice
 from modules.visualizations import plot_convective_profile
+from modules.telemetry import log_action
 
 # 1. PAGE CONFIG & CSS
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
@@ -25,25 +26,22 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. AUTHENTICATION GATEWAY
+# 2. AUTHENTICATION GATEWAY WITH TELEMETRY
 def check_password():
-    """Returns `True` if the user had the correct password."""
-    
     def password_entered():
-        """Checks whether a password entered by the user is correct."""
         user = st.session_state["username"]
         pwd = st.session_state["password"]
         
-        # Check if user exists in secrets and password matches
-        if user in st.secrets["passwords"] and pwd == st.secrets["passwords"][user]:
+        if user in st.secrets.get("passwords", {}) and pwd == st.secrets["passwords"][user]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # Do not store password in session state
+            st.session_state["active_operator"] = user
+            log_action(user, 0.0, 0.0, "SYS", "AUTHENTICATION_SUCCESS")
+            del st.session_state["password"]  
             del st.session_state["username"]
         else:
             st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
-        # First run, show inputs for username + password.
         st.title("Vector Check Aerial Group Inc.")
         st.caption("Atmospheric Risk Management System - Restricted Access")
         st.text_input("Operator ID", key="username")
@@ -52,7 +50,6 @@ def check_password():
         return False
         
     elif not st.session_state["password_correct"]:
-        # Password incorrect, show input + error.
         st.title("Vector Check Aerial Group Inc.")
         st.caption("Atmospheric Risk Management System - Restricted Access")
         st.text_input("Operator ID", key="username")
@@ -62,18 +59,15 @@ def check_password():
         return False
         
     else:
-        # Password correct.
         return True
 
-# STOP EXECUTION IF NOT AUTHENTICATED
 if not check_password():
     st.stop()
 
 # ---------------------------------------------------------
-# MAIN DASHBOARD EXECUTION (ONLY RUNS IF AUTHENTICATED)
+# MAIN DASHBOARD EXECUTION
 # ---------------------------------------------------------
 
-# 3. SIDEBAR PARAMETERS
 LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
 try:
     st.sidebar.image(LOGO_URL, use_container_width=True)
@@ -91,6 +85,7 @@ terrain_type = st.sidebar.selectbox("Terrain Roughness:", options=["Land", "Wate
 
 if st.sidebar.button("Force Manual Data Refresh"):
     st.cache_data.clear()
+    log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "MANUAL_REFRESH")
     st.sidebar.success("Cache Cleared.")
 
 model_api_map = {
@@ -98,16 +93,14 @@ model_api_map = {
     "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/ecmwf"
 }
 
-# 4. FETCH DATA & HEADER RENDER
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar_raw, taf_raw = get_aviation_weather(icao)
 
 st.title("Atmospheric Risk Management")
-st.caption("Vector Check Aerial Group Inc. - SYSTEM ACTIVE")
+st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.session_state.get('active_operator', 'UNKNOWN')}")
 st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
 st.divider()
 
-# 5. PROCESS FORECAST DATA
 if data and "hourly" in data:
     h = data["hourly"]
     times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in h["time"]]
@@ -146,7 +139,6 @@ if data and "hourly" in data:
     t_950 = h.get('temperature_950hPa', [t])[idx]
     is_stable = t_950 is not None and t_950 > (t - 2.0)
 
-    # 6. TACTICAL TABLES
     st.subheader("Tactical Hazard Stack (0-400ft AGL)")
     stack_tactical = []
     for alt in [400, 300, 200, 100]:
@@ -179,7 +171,7 @@ if data and "hourly" in data:
     df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
     st.table(df_ext)
 
-    # --- ADVANCED CSV EXPORT ENGINE ---
+    # --- ADVANCED CSV EXPORT ENGINE WITH TELEMETRY ---
     df_export = pd.concat([df_tactical, df_ext])
     
     clean_metar = re.sub('<[^<]+>', '', metar_raw.replace('<br>', ' '))
@@ -196,14 +188,14 @@ if data and "hourly" in data:
     
     csv_data = (csv_header + df_export.to_csv()).encode('utf-8')
     
-    st.download_button(
+    if st.download_button(
         label="📥 Download Pre-Flight Hazard Matrix (CSV)",
         data=csv_data,
         file_name=f"VCAG_Hazard_Matrix_{icao}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
-    )
+    ):
+        log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, f"DOWNLOAD_CSV_{model_choice}")
 
-    # 7. CONVECTIVE PROFILE
     st.divider()
     st.subheader("Vertical Atmospheric Profile (Convective Ops)")
     sfc_h = data.get('elevation', 0) * 3.28084
@@ -214,11 +206,12 @@ if data and "hourly" in data:
     else:
         st.warning("Insufficient atmospheric layers available to render vertical profile.")
 
-# 8. LIABILITY ARMOR (DISCLAIMER)
+# 7. LIABILITY & TRACKING ARMOR
 st.divider()
 st.markdown("""
 <div style="text-align: center; color: #8E949E; font-size: 0.85rem; padding: 20px;">
 <strong>⚠️ FOR SITUATIONAL AWARENESS ONLY</strong><br>
-This system translates raw meteorological model data for uncrewed systems. It does not replace official NAV CANADA or NOAA flight service briefings. The Pilot in Command (PIC) retains ultimate authority and responsibility for flight safety. Vector Check Aerial Group Inc. assumes no liability for operational decisions made using this tool.
+This system translates raw meteorological model data for uncrewed systems. It does not replace official NAV CANADA or NOAA flight service briefings. The Pilot in Command (PIC) retains ultimate authority and responsibility for flight safety. Vector Check Aerial Group Inc. assumes no liability for operational decisions made using this tool. <br><br>
+<em>Usage of this system, including geographic querying and CSV generation, is actively logged to a secure database for audit and security purposes.</em>
 </div>
 """, unsafe_allow_html=True)
