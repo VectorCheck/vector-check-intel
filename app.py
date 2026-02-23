@@ -3,6 +3,8 @@ import pandas as pd
 import math
 import re
 from datetime import datetime, timezone
+from timezonefinder import TimezoneFinder
+import pytz
 
 # Import Vector Check Modules
 from modules.data_ingest import get_aviation_weather, fetch_mission_data
@@ -76,7 +78,7 @@ except Exception:
     st.sidebar.title("Vector Check")
     st.sidebar.caption("Aerial Group Inc.")
 
-# 3. SIDEBAR PARAMETERS
+# 3. SIDEBAR PARAMETERS 
 st.sidebar.header("Mission Parameters")
 lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f", key="lat_input")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="lon_input")
@@ -110,24 +112,37 @@ st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.sess
 st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
 st.divider()
 
+# Resolve Target Timezone
+tf = TimezoneFinder()
+tz_str = tf.timezone_at(lng=lon, lat=lat)
+local_tz = pytz.timezone(tz_str) if tz_str else timezone.utc
+tz_abbr = datetime.now(local_tz).tzname() if tz_str else "UTC"
+
 if data and "hourly" in data:
     h = data["hourly"]
-    times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in h["time"]]
-    selected_time = st.sidebar.select_slider("Forecast Hour:", options=times, value=times[0])
-    idx = times.index(selected_time)
     
-    t = h['temperature_2m'][idx]
+    # Generate Dual-Time Display for the Slider
+    times_display = []
+    for t in h["time"]:
+        dt_u = datetime.fromisoformat(t).replace(tzinfo=timezone.utc)
+        dt_l = dt_u.astimezone(local_tz)
+        times_display.append(f"{dt_u.strftime('%d %b %H:%M')} Z | {dt_l.strftime('%H:%M')} {tz_abbr}")
+        
+    selected_time_str = st.sidebar.select_slider("Forecast Hour:", options=times_display, value=times_display[0])
+    idx = times_display.index(selected_time_str)
+    
+    t_temp = h['temperature_2m'][idx]
     rh = h['relative_humidity_2m'][idx]
     w_spd = h['wind_speed_10m'][idx]
     wx = h['weather_code'][idx]
-    td = t - ((100 - rh) / 5) if (t is not None and rh is not None) else t
+    td = t_temp - ((100 - rh) / 5) if (t_temp is not None and rh is not None) else t_temp
     sfc_dir = int(h['wind_direction_10m'][idx])
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
-    frz_disp = "SFC" if t <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
-    c_base = int((t - td)*400) if (t is not None and td is not None) else 10000
+    frz_disp = "SFC" if t_temp <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
+    c_base = int((t_temp - td)*400) if (t_temp is not None and td is not None) else 10000
 
     c = st.columns(8)
-    c[0].metric("Temp", f"{t}°C")
+    c[0].metric("Temp", f"{t_temp}°C")
     c[1].metric("RH", f"{rh}%")
     c[2].metric("Wind Dir", f"{sfc_dir:03d}°")
     c[3].metric("Wind Spd", f"{int(w_spd)} kt")
@@ -145,8 +160,8 @@ if data and "hourly" in data:
         u_v, u_dir, u_h = h['wind_speed_100m'][idx], h['wind_direction_100m'][idx], 100
         
     icing_cond = calculate_icing_profile(h, idx, wx)
-    t_950 = h.get('temperature_950hPa', [t])[idx]
-    is_stable = t_950 is not None and t_950 > (t - 2.0)
+    t_950 = h.get('temperature_950hPa', [t_temp])[idx]
+    is_stable = t_950 is not None and t_950 > (t_temp - 2.0)
 
     st.subheader("Tactical Hazard Stack (0-400ft AGL)")
     stack_tactical = []
@@ -181,8 +196,8 @@ if data and "hourly" in data:
     st.table(df_ext)
 
     # --- ASTRONOMICAL DATA SECTION ---
-    dt_utc = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
-    astro = get_astronomical_data(lat, lon, dt_utc)
+    dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
+    astro = get_astronomical_data(lat, lon, dt_utc_exact, local_tz, tz_abbr)
     
     sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL (Below Horizon)"
     moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL (Below Horizon)"
@@ -212,7 +227,7 @@ if data and "hourly" in data:
     csv_header = (
         "VECTOR CHECK AERIAL GROUP INC. - MISSION HAZARD MATRIX\n"
         f"Target ICAO: {icao} | Coordinates: {lat}, {lon}\n"
-        f"Forecast Model: {model_choice} | Valid Time: {selected_time}\n"
+        f"Forecast Model: {model_choice} | Valid Time: {selected_time_str}\n"
         f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
         f"Moon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n"
         f"Position: Sun {sun_pos_display} | Moon {moon_pos_display}\n\n"
@@ -243,7 +258,7 @@ if data and "hourly" in data:
     st.divider()
     st.subheader("Vertical Atmospheric Profile (Convective Ops)")
     sfc_h = data.get('elevation', 0) * 3.28084
-    fig = plot_convective_profile(h, idx, t, td, w_spd, sfc_dir, sfc_h)
+    fig = plot_convective_profile(h, idx, t_temp, td, w_spd, sfc_dir, sfc_h)
     
     if fig:
         st.pyplot(fig)
