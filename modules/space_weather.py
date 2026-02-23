@@ -16,12 +16,9 @@ def evaluate_gnss_risk(kp):
     return {"kp": kp, "risk": "UNKNOWN", "impact": "Data processing error."}
 
 def get_kp_index(target_utc):
-    """Fetches the NOAA Planetary K-index forecast with advanced string-exception handling."""
+    """Fetches the NOAA Planetary K-index forecast with impenetrable data scrubbing."""
     url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
-    
-    headers = {
-        "User-Agent": "VectorCheckAerialGroup/1.0 (ops.vectorcheck.ca)"
-    }
+    headers = {"User-Agent": "VectorCheckAerialGroup/1.0 (ops.vectorcheck.ca)"}
     
     try:
         response = requests.get(url, headers=headers, timeout=5)
@@ -31,26 +28,28 @@ def get_kp_index(target_utc):
         closest_kp = None
         min_diff = float('inf')
         
-        # We loop through the entire payload natively instead of trying to slice headers
         for row in data:
-            if not row: continue
+            if not row or not isinstance(row, list): continue
             
-            # 1. Protect the timestamp parser
+            # Explicitly skip the header row
+            if str(row[0]).strip() == "time_tag": continue 
+            
             try:
                 row_dt = datetime.strptime(str(row[0]), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-            except ValueError:
-                continue # If it says 'time_tag' or another header string, skip the row
+            except Exception:
+                continue # Skip rows with broken timestamps
                 
             predicted_kp = None
             
-            # 2. Protect the float converter
-            try:
-                if len(row) >= 4 and row[3]: predicted_kp = float(row[3])
-                elif len(row) >= 3 and row[2]: predicted_kp = float(row[2])
-                elif len(row) >= 2 and row[1]: predicted_kp = float(row[1])
-            except ValueError:
-                continue # If it encounters 'observed' or 'estimated', skip the data point
-                
+            # Brute-force float testing: Scan columns right-to-left
+            for i in [3, 2, 1]:
+                if len(row) > i and row[i]:
+                    try:
+                        predicted_kp = float(str(row[i]).strip())
+                        break # Successfully found a valid number
+                    except ValueError:
+                        pass # It was a rogue string like 'observed', keep searching
+                        
             if predicted_kp is not None:
                 diff = abs((target_utc - row_dt).total_seconds())
                 if diff < min_diff:
@@ -60,9 +59,9 @@ def get_kp_index(target_utc):
         if closest_kp is not None:
             return evaluate_gnss_risk(closest_kp)
         else:
-            return {"kp": "ERR", "risk": "PARSE_FAIL", "impact": "Connected to NOAA, but data format unrecognized."}
+            return {"kp": "ERR", "risk": "PARSE_FAIL", "impact": "Connected to NOAA, but no valid Kp numbers found."}
             
     except requests.exceptions.HTTPError as err:
-        return {"kp": "ERR", "risk": "HTTP_ERR", "impact": f"NOAA Firewall/Server Block: {err}"}
+        return {"kp": "ERR", "risk": "HTTP_ERR", "impact": f"NOAA Firewall Block: {err}"}
     except Exception as e:
         return {"kp": "ERR", "risk": "SYS_ERR", "impact": f"System Exception: {str(e)}"}
