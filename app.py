@@ -83,7 +83,7 @@ def apply_tactical_highlights(text):
             if 3 <= val_sm <= 5: return f'<span class="mvfr-text">{raw}</span>'
         except: pass
         return raw
-    text = re.sub(r'(?<!\S)(\d{4})(?!\S)', vis_match_m, text)
+    text = re.sub(r'(?<!\S)(\d{4})(?![Z/\d])(?!\S)', vis_match_m, text)
 
     def sky_match(m):
         try:
@@ -163,7 +163,7 @@ def fetch_mission_data(lat, lon, model_url):
     if "gem" in model_url: hourly += ["wind_gusts_10m", "wind_speed_80m", "wind_speed_120m", "wind_direction_80m", "wind_direction_120m"]
     else: hourly += ["wind_speed_100m", "wind_direction_100m"]
     hourly += [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels] + [f"geopotential_height_{p}hPa" for p in p_levels] + [f"wind_speed_{p}hPa" for p in p_levels] + [f"wind_direction_{p}hPa" for p in p_levels]
-    res = requests.get(model_url, params={"latitude": lat, "longitude": lon, "hourly": hourly, "wind_speed_unit": "kn", "forecast_hours": 48, "timezone": "UTC"})
+    res = requests.get(model_url, params={"latitude": lat, "longitude": lon, "hourly": hourly, "wind_speed_unit": "kn", "forecast_hours": 48, "timezone": "UTC", "elevation": "nan"})
     return res.json() if res.status_code == 200 else None
 
 # 6. RENDER
@@ -181,7 +181,10 @@ if data and "hourly" in data:
     selected_time = st.sidebar.select_slider("Forecast Hour:", options=times, value=times[0])
     idx = times.index(selected_time)
     
-    t, rh, w_spd, wx = h['temperature_2m'][idx], h['relative_humidity_2m'][idx], h['wind_speed_10m'][idx], h['weather_code'][idx]
+    t = h['temperature_2m'][idx]
+    rh = h['relative_humidity_2m'][idx]
+    w_spd = h['wind_speed_10m'][idx]
+    wx = h['weather_code'][idx]
     td = t - ((100 - rh) / 5) if (t is not None and rh is not None) else t
     sfc_dir = int(h['wind_direction_10m'][idx])
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
@@ -189,15 +192,23 @@ if data and "hourly" in data:
     c_base = int((t - td)*400) if (t is not None and td is not None) else 10000
 
     c = st.columns(8)
-    c[0].metric("Temp", f"{t}°C"); c[1].metric("RH", f"{rh}%"); c[2].metric("Wind Dir", f"{sfc_dir:03d}°")
-    c[3].metric("Wind Spd", f"{int(w_spd)} kt"); c[4].metric("Precip Type", get_precip_type(wx))
-    c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm"); c[6].metric("Freezing LVL", frz_disp); c[7].metric("Cloud Base", f"{c_base} ft")
+    c[0].metric("Temp", f"{t}°C")
+    c[1].metric("RH", f"{rh}%")
+    c[2].metric("Wind Dir", f"{sfc_dir:03d}°")
+    c[3].metric("Wind Spd", f"{int(w_spd)} kt")
+    c[4].metric("Precip Type", get_precip_type(wx))
+    c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm")
+    c[6].metric("Freezing LVL", frz_disp)
+    c[7].metric("Cloud Base", f"{c_base} ft")
 
     raw_gst = h.get('wind_gusts_10m', [w_spd]*len(h['time']))[idx]
     gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
-    if "gem" in model_api_map[model_choice]: u_v, u_dir, u_h = h['wind_speed_120m'][idx], h['wind_direction_120m'][idx], 120
-    else: u_v, u_dir, u_h = h['wind_speed_100m'][idx], h['wind_direction_100m'][idx], 100
     
+    if "gem" in model_api_map[model_choice]:
+        u_v, u_dir, u_h = h['wind_speed_120m'][idx], h['wind_direction_120m'][idx], 120
+    else:
+        u_v, u_dir, u_h = h['wind_speed_100m'][idx], h['wind_direction_100m'][idx], 100
+        
     icing_cond = calculate_icing_profile(h, idx, wx)
     t_950 = h.get('temperature_950hPa', [t])[idx]
     is_stable = t_950 is not None and t_950 > (t - 2.0)
@@ -207,7 +218,8 @@ if data and "hourly" in data:
         if wx in [95, 96, 99]: t_type, t_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
         elif is_stable and sh_1k >= 20: t_type, t_sev = "LLWS", ("SEV" if sh_1k >= 40 else "MDT")
         else:
-            t_type = "MECH"; max_w = max(spd, cur_gst)
+            t_type = "MECH"
+            max_w = max(spd, cur_gst)
             if max_w < 15: t_sev = "NONE"
             elif max_w < 25: t_sev = "LGT"
             elif max_w < 35: t_sev = "MOD"
@@ -235,9 +247,13 @@ if data and "hourly" in data:
         pts = [{'h': u_h*3.28, 's': u_v, 'd': u_dir}] + p_profile
         blw, abv = pts[0], pts[-1]
         for i in range(len(pts)-1):
-            if pts[i]['h'] <= alt <= pts[i+1]['h']: blw, abv = pts[i], pts[i+1]; break
+            if pts[i]['h'] <= alt <= pts[i+1]['h']:
+                blw, abv = pts[i], pts[i+1]
+                break
+        
         frac = (alt - blw['h']) / (abv['h'] - blw['h']) if abv['h'] != blw['h'] else 0
-        s_e, d_e = blw['s'] + frac * (abv['s'] - blw['s']), (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
+        s_e = blw['s'] + frac * (abv['s'] - blw['s'])
+        d_e = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
         turb, ice = get_turb_ice(alt, s_e, s_e, u_v, sfc_dir, u_dir)
         stack_ext.append({"Alt (AGL)": f"{alt}ft", "Dir": f"{int(d_e):03d}°", "Spd (kt)": int(s_e), "Turbulence": turb, "Icing": ice})
     st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
@@ -247,84 +263,107 @@ if data and "hourly" in data:
     st.subheader("Vertical Atmospheric Profile (Convective Ops)")
     
     p_levs_plot = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
-    t_plot = [h.get(f'temperature_{p}hPa')[idx] for p in p_levs_plot]
-    td_plot = [h.get(f'dewpoint_{p}hPa')[idx] for p in p_levs_plot]
-    ws_plot = [h.get(f'wind_speed_{p}hPa')[idx] for p in p_levs_plot]
-    wd_plot = [h.get(f'wind_direction_{p}hPa')[idx] for p in p_levs_plot]
-    h_plot = [h.get(f'geopotential_height_{p}hPa')[idx] * 3.28084 if h.get(f'geopotential_height_{p}hPa')[idx] is not None else None for p in p_levs_plot]
+    
+    # Aggressive Data Scrubbing: Extract only valid pressure levels
+    valid_p = []
+    t_plot_valid, td_plot_valid, h_plot_valid, ws_plot_valid, wd_plot_valid = [], [], [], [], []
+    for p in p_levs_plot:
+        t_val = h.get(f'temperature_{p}hPa')[idx]
+        td_val = h.get(f'dewpoint_{p}hPa')[idx]
+        h_val = h.get(f'geopotential_height_{p}hPa')[idx]
+        ws_val = h.get(f'wind_speed_{p}hPa')[idx]
+        wd_val = h.get(f'wind_direction_{p}hPa')[idx]
+        
+        if t_val is not None and td_val is not None and h_val is not None:
+            valid_p.append(p)
+            t_plot_valid.append(t_val)
+            td_plot_valid.append(td_val)
+            h_plot_valid.append(h_val * 3.28084)
+            ws_plot_valid.append(ws_val)
+            wd_plot_valid.append(wd_val)
 
-    if all(v is not None for v in t_plot) and all(v is not None for v in h_plot):
+    # Ensure we have enough data to plot
+    if len(valid_p) >= 3:
+        sfc_h = data.get('elevation', 0) * 3.28084
+        
+        # Inject true surface metrics to anchor the plot to the ground
+        if sfc_h < h_plot_valid[0]:
+            h_plot_valid.insert(0, sfc_h)
+            t_plot_valid.insert(0, t)
+            td_plot_valid.insert(0, td)
+            ws_plot_valid.insert(0, w_spd)
+            wd_plot_valid.insert(0, sfc_dir)
+
         fig, ax = plt.subplots(figsize=(10, 8))
-        fig.patch.set_facecolor('#1B1E23'); ax.set_facecolor('#1B1E23')
+        fig.patch.set_facecolor('#1B1E23')
+        ax.set_facecolor('#1B1E23')
 
         # Environment Lines
-        ax.plot(t_plot, h_plot, color='#e74c3c', linewidth=3, label='Env Temp (°C)', zorder=5)
-        ax.plot(td_plot, h_plot, color='#3498db', linewidth=3, label='Dewpoint (°C)', zorder=5)
+        ax.plot(t_plot_valid, h_plot_valid, color='#e74c3c', linewidth=3, label='Env Temp (°C)', zorder=5)
+        ax.plot(td_plot_valid, h_plot_valid, color='#3498db', linewidth=3, label='Dewpoint (°C)', zorder=5)
 
         # Cloud Saturation Shading
-        ax.fill_betweenx(h_plot, t_plot, td_plot, where=(np.array(t_plot) - np.array(td_plot) <= 3.0), color='#8E949E', alpha=0.3, label='Saturated / Cloud')
+        ax.fill_betweenx(h_plot_valid, t_plot_valid, td_plot_valid, where=(np.array(t_plot_valid) - np.array(td_plot_valid) <= 3.0), color='#8E949E', alpha=0.3, label='Saturated / Cloud')
 
         # Background Adiabatic Grid
-        max_h = max(h_plot)
+        max_h = max(h_plot_valid)
         h_grid = np.linspace(0, max_h, 50)
         
-        # Dry Adiabats (~3C per 1000ft)
         for t_base in range(-40, 60, 10):
-            t_dry = t_base - (3.0 * (h_grid / 1000.0))
-            ax.plot(t_dry, h_grid, color='#e67e22', linestyle='dashed', alpha=0.2, linewidth=1)
-            
-        # Moist Adiabats (Empirical curve approx)
-        for t_base in range(-40, 60, 10):
+            ax.plot(t_base - (3.0 * (h_grid / 1000.0)), h_grid, color='#e67e22', linestyle='dashed', alpha=0.2, linewidth=1)
             t_moist = np.zeros_like(h_grid)
             t_moist[0] = t_base
             for i in range(1, len(h_grid)):
-                dz_ft = h_grid[i] - h_grid[i-1]
-                t_c = t_moist[i-1]
-                salr = 1.2 + 1.8 * (1.0 / (1.0 + np.exp((t_c + 15)/10)))
-                t_moist[i] = t_c - (salr * (dz_ft / 1000.0))
+                salr = 1.2 + 1.8 * (1.0 / (1.0 + np.exp((t_moist[i-1] + 15)/10)))
+                t_moist[i] = t_moist[i-1] - (salr * ((h_grid[i] - h_grid[i-1]) / 1000.0))
             ax.plot(t_moist, h_grid, color='#27ae60', linestyle='dotted', alpha=0.3, linewidth=1)
 
-        # Theoretical Surface Parcel Trajectory (Convective Path)
-        sfc_t = t_plot[0]; sfc_td = td_plot[0]; sfc_h = h_plot[0]
-        lcl_h = sfc_h + 400 * (sfc_t - sfc_td)
-        
-        parcel_t = []
-        for h_val in h_plot:
-            if h_val <= lcl_h:
-                p_t = sfc_t - 3.0 * ((h_val - sfc_h) / 1000.0)
+        # Corrected Surface Parcel Trajectory
+        lcl_h = sfc_h + 400 * (t - td)
+        p_t_plot = []
+        for hv in h_plot_valid:
+            if hv <= lcl_h:
+                pt = t - 3.0 * ((hv - sfc_h) / 1000.0)
             else:
-                t_lcl = sfc_t - 3.0 * ((lcl_h - sfc_h) / 1000.0)
-                dz = h_val - lcl_h
+                t_lcl = t - 3.0 * ((lcl_h - sfc_h) / 1000.0)
                 salr = 1.2 + 1.8 * (1.0 / (1.0 + np.exp((t_lcl + 15)/10)))
-                p_t = t_lcl - salr * (dz / 1000.0)
-            parcel_t.append(p_t)
+                pt = t_lcl - salr * ((hv - lcl_h) / 1000.0)
+            p_t_plot.append(pt)
             
-        ax.plot(parcel_t, h_plot, color='#f1c40f', linewidth=2, linestyle='-.', label='Surface Parcel Trajectory', zorder=6)
+        ax.plot(p_t_plot, h_plot_valid, color='#f1c40f', linewidth=2, linestyle='-.', label='Surface Parcel Trajectory', zorder=6)
         
-        # Shade CAPE (Convective Available Potential Energy)
-        ax.fill_betweenx(h_plot, t_plot, parcel_t, where=(np.array(parcel_t) > np.array(t_plot)), color='#ff4b4b', alpha=0.4, label='CAPE (Instability Risk)')
+        # Shade CAPE safely using maximum to prevent inverse shading
+        ax.fill_betweenx(h_plot_valid, t_plot_valid, p_t_plot, where=(np.array(p_t_plot) > np.array(t_plot_valid)), color='#ff4b4b', alpha=0.4, label='CAPE (Instability Risk)')
 
         # 0C Isotherm
         ax.axvline(0, color='#B976AC', linestyle='--', linewidth=2, alpha=0.8, label='0°C Isotherm')
 
-        # Formatting
         ax.set_ylabel('Altitude (ft MSL)', color='#A0A4AB', fontsize=12, fontweight='bold')
         ax.set_xlabel('Temperature (°C)', color='#A0A4AB', fontsize=12, fontweight='bold')
         ax.tick_params(axis='both', colors='#D1D5DB', labelsize=10)
         ax.grid(color='#2D3139', linestyle='-', linewidth=1)
-        for spine in ax.spines.values(): spine.set_color('#3E444E')
+        for spine in ax.spines.values():
+            spine.set_color('#3E444E')
             
-        min_x, max_x = min(td_plot) - 5, max(t_plot) + 15
-        ax.set_xlim(min_x, max_x); ax.set_ylim(min(h_plot), max(h_plot))
+        min_x = min(td_plot_valid) - 5
+        max_x = max(t_plot_valid) + 15
+        ax.set_xlim(min_x, max_x)
+        ax.set_ylim(min(h_plot_valid), max(h_plot_valid))
 
-        # Wind Barbs
         u_p, v_p = [], []
-        for ws_v, wd_v in zip(ws_plot, wd_plot):
-            if ws_v is not None and wd_v is not None: u_p.append(-ws_v * np.sin(np.radians(wd_v))); v_p.append(-ws_v * np.cos(np.radians(wd_v)))
-            else: u_p.append(0); v_p.append(0)
-        ax.barbs([max_x - 5] * len(h_plot), h_plot, u_p, v_p, color='#D1D5DB', length=6)
+        for ws_v, wd_v in zip(ws_plot_valid, wd_plot_valid):
+            if ws_v is not None and wd_v is not None:
+                u_p.append(-ws_v * np.sin(np.radians(wd_v)))
+                v_p.append(-ws_v * np.cos(np.radians(wd_v)))
+            else:
+                u_p.append(0)
+                v_p.append(0)
+                
+        ax.barbs([max_x - 5] * len(h_plot_valid), h_plot_valid, u_p, v_p, color='#D1D5DB', length=6)
         
         ax.legend(loc='upper left', facecolor='#1B1E23', edgecolor='#3E444E', labelcolor='#D1D5DB', prop={'size': 9})
-        plt.figtext(0.14, 0.88, f"Surface Elev: {int(data.get('elevation', 0)*3.28)} ft", color='#A0A4AB', fontsize=10, backgroundcolor='#1B1E23')
+        plt.figtext(0.14, 0.88, f"Surface Elev: {int(sfc_h)} ft", color='#A0A4AB', fontsize=10, backgroundcolor='#1B1E23')
 
         st.pyplot(fig)
+    else:
+        st.warning("Insufficient atmospheric layers available to render vertical profile.")
