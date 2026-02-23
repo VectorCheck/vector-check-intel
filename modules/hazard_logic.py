@@ -1,4 +1,20 @@
 import math
+import re
+
+def apply_tactical_highlights(text):
+    """Applies HTML formatting to raw METAR/TAF strings to highlight aviation hazards."""
+    if not text: 
+        return text
+    # Red highlights for severe weather, freezing precip, and hard IFR conditions
+    text = re.sub(r'\b(TS\w*|FZ\w*|GR|FC|VA)\b', r'<span class="fz-warn">\1</span>', text)
+    text = re.sub(r'\b(BKN|OVC)(00[0-9]|010)\b', r'<span class="ifr-text">\1\2</span>', text)
+    text = re.sub(r'\b([0-2]SM|1/4SM|1/2SM|3/4SM)\b', r'<span class="ifr-text">\1</span>', text)
+    
+    # Yellow highlights for MVFR conditions
+    text = re.sub(r'\b([3-5]SM)\b', r'<span class="mvfr-text">\1</span>', text)
+    text = re.sub(r'\b(BKN|OVC)(01[1-9]|02[0-9]|030)\b', r'<span class="mvfr-text">\1\2</span>', text)
+    
+    return text
 
 def get_precip_type(wx_code):
     """Maps WMO weather codes to standard aviation METAR precipitation codes."""
