@@ -75,18 +75,27 @@ except Exception:
     st.sidebar.title("Vector Check")
     st.sidebar.caption("Aerial Group Inc.")
 
+# 3. SIDEBAR PARAMETERS (Wired to Session State Keys)
 st.sidebar.header("Mission Parameters")
-lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f")
-lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f")
-icao = st.sidebar.text_input("Nearest ICAO", value="CYTR").upper().strip()
+lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f", key="lat_input")
+lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="lon_input")
+icao = st.sidebar.text_input("Nearest ICAO", value="CYTR", key="icao_input").upper().strip()
 
 model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
 terrain_type = st.sidebar.selectbox("Terrain Roughness:", options=["Land", "Water", "Mountains"])
 
-if st.sidebar.button("Force Manual Data Refresh"):
+# --- TELEMETRY CALLBACK: MANUAL REFRESH ---
+def log_refresh_callback():
     st.cache_data.clear()
-    log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "MANUAL_REFRESH")
-    st.sidebar.success("Cache Cleared.")
+    log_action(
+        st.session_state.get("active_operator", "UNKNOWN"), 
+        st.session_state.get("lat_input", 44.1628), 
+        st.session_state.get("lon_input", -77.3832), 
+        st.session_state.get("icao_input", "CYTR"), 
+        "MANUAL_REFRESH"
+    )
+
+st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 
 model_api_map = {
     "HRDPS (Canada 2.5km)": "https://api.open-meteo.com/v1/gem",
@@ -171,7 +180,7 @@ if data and "hourly" in data:
     df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
     st.table(df_ext)
 
-    # --- ADVANCED CSV EXPORT ENGINE WITH TELEMETRY ---
+    # --- ADVANCED CSV EXPORT ENGINE WITH TELEMETRY CALLBACK ---
     df_export = pd.concat([df_tactical, df_ext])
     
     clean_metar = re.sub('<[^<]+>', '', metar_raw.replace('<br>', ' '))
@@ -188,13 +197,22 @@ if data and "hourly" in data:
     
     csv_data = (csv_header + df_export.to_csv()).encode('utf-8')
     
-    if st.download_button(
+    def log_download_callback():
+        log_action(
+            st.session_state.get("active_operator", "UNKNOWN"), 
+            st.session_state.get("lat_input", 44.1628), 
+            st.session_state.get("lon_input", -77.3832), 
+            st.session_state.get("icao_input", "CYTR"), 
+            f"DOWNLOAD_CSV_{model_choice}"
+        )
+    
+    st.download_button(
         label="📥 Download Pre-Flight Hazard Matrix (CSV)",
         data=csv_data,
         file_name=f"VCAG_Hazard_Matrix_{icao}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
-    ):
-        log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, f"DOWNLOAD_CSV_{model_choice}")
+        on_click=log_download_callback
+    )
 
     st.divider()
     st.subheader("Vertical Atmospheric Profile (Convective Ops)")
