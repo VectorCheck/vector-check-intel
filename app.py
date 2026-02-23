@@ -53,32 +53,20 @@ model_api_map = {
 # 3. HIGHLIGHTING HELPERS (METAR/TAF)
 def apply_tactical_highlights(text):
     if not text: return ""
-    
-    # 1. Severe Weather / Freezing Precip
-    def precip_match(m):
-        return f'<span class="fz-warn">{m.group(0)}</span>'
+    def precip_match(m): return f'<span class="fz-warn">{m.group(0)}</span>'
     text = re.sub(r'(?<!\S)[-+]?[A-Z]*(?:FZ|PL|TS|GR|SQ)[A-Z]*(?!\S)', precip_match, text)
     
-    # 2. Visibility (Statute Miles - handles P6SM, 1 1/2SM, M1/4SM)
     def vis_match_sm(m):
         raw = m.group(0)
         try:
             clean = raw.upper().replace('SM', '').replace('P', '').replace('M', '').strip()
-            parts = clean.split()
-            val = 0.0
-            for p in parts:
-                if '/' in p:
-                    num, den = p.split('/')
-                    val += float(num) / float(den)
-                else:
-                    val += float(p)
+            val = sum(float(num)/float(den) if '/' in p else float(p) for p in clean.split() for num, den in [p.split('/')] if '/' in p else [0]) if '/' in clean else float(clean)
             if val < 3: return f'<span class="ifr-text">{raw}</span>'
             if 3 <= val <= 5: return f'<span class="mvfr-text">{raw}</span>'
         except: pass
         return raw
     text = re.sub(r'(?<!\S)[PM]?(?:\d+\s+)?(?:\d+/\d+|\d+)SM(?!\S)', vis_match_sm, text)
 
-    # 3. Visibility (ICAO Meters - handles 0800, 1200, 9999)
     def vis_match_m(m):
         raw = m.group(1)
         try:
@@ -91,7 +79,6 @@ def apply_tactical_highlights(text):
         return raw
     text = re.sub(r'(?<!\S)(\d{4})(?!\S)', vis_match_m, text)
 
-    # 4. Ceiling/Sky (BKN, OVC, VV with optional CB/TCU)
     def sky_match(m):
         try:
             h = int(m.group(2)) * 100
@@ -100,7 +87,6 @@ def apply_tactical_highlights(text):
         except: pass
         return m.group(0)
     text = re.sub(r'(?<!\S)(BKN|OVC|VV)(\d{3})(?:CB|TCU)?(?!\S)', sky_match, text)
-    
     return text
 
 def get_precip_type(code):
@@ -116,45 +102,42 @@ def calculate_icing_profile(hourly_data, idx, wx_code):
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     profile = []
     for p in p_levels:
-        t_val = hourly_data.get(f"temperature_{p}hPa")[idx]
-        td_val = hourly_data.get(f"dewpoint_{p}hPa")[idx]
+        t_v = hourly_data.get(f"temperature_{p}hPa")[idx]
+        td_v = hourly_data.get(f"dewpoint_{p}hPa")[idx]
         h_m = hourly_data.get(f"geopotential_height_{p}hPa")[idx]
-        if t_val is not None and td_val is not None and h_m is not None:
-            profile.append({"p": p, "t": t_val, "td": td_val, "h_ft": h_m * 3.28084})
+        if t_v is not None and td_v is not None and h_m is not None:
+            profile.append({"p": p, "t": t_v, "td": td_v, "h_ft": h_m * 3.28084})
     
     cloud_layers = []
-    current_layer = {"base": None, "top": None, "min_t": 100, "max_t": -100, "inversion": False}
+    curr = {"base": None, "top": None, "min_t": 100, "max_t": -100, "inv": False}
     for i, lvl in enumerate(profile):
         if (lvl["t"] - lvl["td"]) <= 3.0:
-            if current_layer["base"] is None: 
-                current_layer["base"] = lvl["h_ft"]
-                current_layer["bottom_t"] = lvl["t"]
-            current_layer["top"] = lvl["h_ft"]
-            current_layer["min_t"] = min(current_layer["min_t"], lvl["t"])
-            current_layer["max_t"] = max(current_layer["max_t"], lvl["t"])
-            if i > 0 and lvl["t"] > profile[i-1]["t"]: current_layer["inversion"] = True
+            if curr["base"] is None: 
+                curr["base"] = lvl["h_ft"]
+                curr["bottom_t"] = lvl["t"]
+            curr["top"] = lvl["h_ft"]
+            curr["min_t"] = min(curr["min_t"], lvl["t"])
+            curr["max_t"] = max(curr["max_t"], lvl["t"])
+            if i > 0 and lvl["t"] > profile[i-1]["t"]: curr["inv"] = True
         else:
-            if current_layer["base"] is not None:
-                current_layer["thickness"] = current_layer["top"] - current_layer["base"]
-                cloud_layers.append(current_layer)
-                current_layer = {"base": None, "top": None, "min_t": 100, "max_t": -100, "inversion": False}
+            if curr["base"] is not None:
+                curr["thick"] = curr["top"] - curr["base"]
+                cloud_layers.append(curr)
+                curr = {"base": None, "top": None, "min_t": 100, "max_t": -100, "inv": False}
     
-    icing_result = {"type": "NONE", "sev": "NONE", "base": 99999, "top": -99999}
     if wx_code in [66, 67, 56, 57]: return {"type": "CLR (FZRA)", "sev": "SEV", "base": 0, "top": 10000}
-
     for layer in cloud_layers:
         if layer["max_t"] <= 0.5:
-            i_type, i_sev = "RIME", "LGT"
-            if layer["thickness"] > 1500 or layer["inversion"]: i_type, i_sev = "MXD", "MOD"
-            if layer["thickness"] > 4000: i_sev = "SEV"
-            return {"type": i_type, "sev": i_sev, "base": layer["base"], "top": layer["top"]}
-    return icing_result
+            i_t, i_s = "RIME", "LGT"
+            if layer["thick"] > 1500 or layer["inv"]: i_t, i_s = "MXD", "MOD"
+            if layer["thick"] > 4000: i_s = "SEV"
+            return {"type": i_t, "sev": i_s, "base": layer["base"], "top": layer["top"]}
+    return {"type": "NONE", "sev": "NONE", "base": 99999, "top": -99999}
 
 # 5. DATA FETCHING
 @st.cache_data(ttl=60)
 def get_aviation_weather(station):
-    API_KEY = "c453505478304bbbae7761f99c8a84ba" 
-    headers = {"X-API-Key": API_KEY}
+    headers = {"X-API-Key": "c453505478304bbbae7761f99c8a84ba"}
     try:
         m_res = requests.get(f"https://api.checkwx.com/metar/{station}/decoded?count=3", headers=headers, timeout=10)
         t_res = requests.get(f"https://api.checkwx.com/taf/{station}/decoded", headers=headers, timeout=10)
@@ -162,7 +145,6 @@ def get_aviation_weather(station):
         metars = [apply_tactical_highlights(r.get('raw_text', '')) for r in m_data.get('data', [])]
         for i in range(len(metars)):
             if "SPECI" in metars[i]: metars[i] = metars[i].replace("SPECI", '<span style="color: #E58E26; font-weight: bold;">SPECI</span>')
-        
         taf_raw = t_res.json().get('data', [{}])[0].get('raw_text', "NO ACTIVE TAF")
         taf_final = re.sub(r'\b(FM\d{6}|TEMPO|PROB\d{2}|BECMG)\b', r'<br><b>\1</b>', apply_tactical_highlights(taf_raw))
         return "<br>".join(metars) if metars else "NO DATA", taf_final
@@ -205,7 +187,6 @@ if data and "hourly" in data:
     c[3].metric("Wind Spd", f"{int(w_spd)} kt"); c[4].metric("Precip Type", get_precip_type(wx))
     c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm"); c[6].metric("Freezing LVL", frz_disp); c[7].metric("Cloud Base", f"{c_base} ft")
 
-    # WIND/TURB CALCS
     raw_gst = h.get('wind_gusts_10m', [w_spd]*len(h['time']))[idx]
     gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
     if "gem" in model_api_map[model_choice]: u_v, u_dir, u_h = h['wind_speed_120m'][idx], h['wind_direction_120m'][idx], 120
@@ -215,14 +196,12 @@ if data and "hourly" in data:
     t_950 = h.get('temperature_950hPa', [t])[idx]
     is_stable = t_950 is not None and t_950 > (t - 2.0)
 
-    # HAZARD LOGIC HELPER
     def get_turb_ice(alt, spd, cur_gst, u_v, sfc_dir, u_dir):
-        shear_per_1000 = ((spd - w_spd) / alt) * 1000 if alt > 0 else 0
+        sh_1k = ((spd - w_spd) / alt) * 1000 if alt > 0 else 0
         if wx in [95, 96, 99]: t_type, t_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
-        elif is_stable and shear_per_1000 >= 20: t_type, t_sev = "LLWS", ("SEV" if shear_per_1000 >= 40 else "MDT")
+        elif is_stable and sh_1k >= 20: t_type, t_sev = "LLWS", ("SEV" if sh_1k >= 40 else "MDT")
         else:
-            t_type = "MECH"
-            max_w = max(spd, cur_gst)
+            t_type = "MECH"; max_w = max(spd, cur_gst)
             if max_w < 15: t_sev = "NONE"
             elif max_w < 25: t_sev = "LGT"
             elif max_w < 35: t_sev = "MOD"
@@ -232,7 +211,6 @@ if data and "hourly" in data:
         elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice = f"{icing_cond['sev']} {icing_cond['type']}"
         return f"{t_sev} {t_type}" if t_sev != "NONE" else "NONE", ice
 
-    # --- TABLES ---
     st.subheader("Tactical Hazard Stack (0-400ft AGL)")
     stack_tactical = []
     for alt in [400, 300, 200, 100]:
@@ -258,9 +236,9 @@ if data and "hourly" in data:
         stack_ext.append({"Alt (AGL)": f"{alt}ft", "Dir": f"{int(d_e):03d}°", "Spd (kt)": int(s_e), "Turbulence": turb, "Icing": ice})
     st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
 
-    # --- WINDY-STYLE VERTICAL PROFILE ---
+    # --- WINDY-STYLE CONVECTIVE PROFILE ---
     st.divider()
-    st.subheader("Vertical Atmospheric Profile")
+    st.subheader("Vertical Atmospheric Profile (Convective Ops)")
     
     p_levs_plot = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     t_plot = [h.get(f'temperature_{p}hPa')[idx] for p in p_levs_plot]
@@ -271,15 +249,54 @@ if data and "hourly" in data:
 
     if all(v is not None for v in t_plot) and all(v is not None for v in h_plot):
         fig, ax = plt.subplots(figsize=(10, 8))
-        fig.patch.set_facecolor('#1B1E23')
-        ax.set_facecolor('#1B1E23')
+        fig.patch.set_facecolor('#1B1E23'); ax.set_facecolor('#1B1E23')
 
-        # Plot Temp and Dewpoint
-        ax.plot(t_plot, h_plot, color='#e74c3c', linewidth=3, label='Temp (°C)')
-        ax.plot(td_plot, h_plot, color='#3498db', linewidth=3, label='Dewpoint (°C)')
+        # Environment Lines
+        ax.plot(t_plot, h_plot, color='#e74c3c', linewidth=3, label='Env Temp (°C)', zorder=5)
+        ax.plot(td_plot, h_plot, color='#3498db', linewidth=3, label='Dewpoint (°C)', zorder=5)
 
-        # Fill Cloud Layers (Spread <= 3C)
-        ax.fill_betweenx(h_plot, t_plot, td_plot, where=(np.array(t_plot) - np.array(td_plot) <= 3.0), color='#8E949E', alpha=0.3, label='Saturation / Cloud Deck')
+        # Cloud Saturation Shading
+        ax.fill_betweenx(h_plot, t_plot, td_plot, where=(np.array(t_plot) - np.array(td_plot) <= 3.0), color='#8E949E', alpha=0.3, label='Saturated / Cloud')
+
+        # Background Adiabatic Grid
+        max_h = max(h_plot)
+        h_grid = np.linspace(0, max_h, 50)
+        
+        # Dry Adiabats (~3C per 1000ft)
+        for t_base in range(-40, 60, 10):
+            t_dry = t_base - (3.0 * (h_grid / 1000.0))
+            ax.plot(t_dry, h_grid, color='#e67e22', linestyle='dashed', alpha=0.2, linewidth=1)
+            
+        # Moist Adiabats (Empirical curve approx)
+        for t_base in range(-40, 60, 10):
+            t_moist = np.zeros_like(h_grid)
+            t_moist[0] = t_base
+            for i in range(1, len(h_grid)):
+                dz_ft = h_grid[i] - h_grid[i-1]
+                t_c = t_moist[i-1]
+                salr = 1.2 + 1.8 * (1.0 / (1.0 + np.exp((t_c + 15)/10)))
+                t_moist[i] = t_c - (salr * (dz_ft / 1000.0))
+            ax.plot(t_moist, h_grid, color='#27ae60', linestyle='dotted', alpha=0.3, linewidth=1)
+
+        # Theoretical Surface Parcel Trajectory (Convective Path)
+        sfc_t = t_plot[0]; sfc_td = td_plot[0]; sfc_h = h_plot[0]
+        lcl_h = sfc_h + 400 * (sfc_t - sfc_td)
+        
+        parcel_t = []
+        for h_val in h_plot:
+            if h_val <= lcl_h:
+                p_t = sfc_t - 3.0 * ((h_val - sfc_h) / 1000.0)
+            else:
+                t_lcl = sfc_t - 3.0 * ((lcl_h - sfc_h) / 1000.0)
+                dz = h_val - lcl_h
+                salr = 1.2 + 1.8 * (1.0 / (1.0 + np.exp((t_lcl + 15)/10)))
+                p_t = t_lcl - salr * (dz / 1000.0)
+            parcel_t.append(p_t)
+            
+        ax.plot(parcel_t, h_plot, color='#f1c40f', linewidth=2, linestyle='-.', label='Surface Parcel Trajectory', zorder=6)
+        
+        # Shade CAPE (Convective Available Potential Energy)
+        ax.fill_betweenx(h_plot, t_plot, parcel_t, where=(np.array(parcel_t) > np.array(t_plot)), color='#ff4b4b', alpha=0.4, label='CAPE (Instability Risk)')
 
         # 0C Isotherm
         ax.axvline(0, color='#B976AC', linestyle='--', linewidth=2, alpha=0.8, label='0°C Isotherm')
@@ -289,28 +306,19 @@ if data and "hourly" in data:
         ax.set_xlabel('Temperature (°C)', color='#A0A4AB', fontsize=12, fontweight='bold')
         ax.tick_params(axis='both', colors='#D1D5DB', labelsize=10)
         ax.grid(color='#2D3139', linestyle='-', linewidth=1)
-        for spine in ax.spines.values():
-            spine.set_color('#3E444E')
+        for spine in ax.spines.values(): spine.set_color('#3E444E')
             
-        # Set limits to fit wind barbs
-        min_x = min(td_plot) - 5
-        max_x = max(t_plot) + 15
-        ax.set_xlim(min_x, max_x)
-        ax.set_ylim(min(h_plot), max(h_plot))
+        min_x, max_x = min(td_plot) - 5, max(t_plot) + 15
+        ax.set_xlim(min_x, max_x); ax.set_ylim(min(h_plot), max(h_plot))
 
         # Wind Barbs
         u_p, v_p = [], []
         for ws_v, wd_v in zip(ws_plot, wd_plot):
-            if ws_v is not None and wd_v is not None:
-                u_p.append(-ws_v * np.sin(np.radians(wd_v)))
-                v_p.append(-ws_v * np.cos(np.radians(wd_v)))
-            else:
-                u_p.append(0); v_p.append(0)
-                
-        barb_x = [max_x - 5] * len(h_plot)
-        ax.barbs(barb_x, h_plot, u_p, v_p, color='#D1D5DB', length=6)
+            if ws_v is not None and wd_v is not None: u_p.append(-ws_v * np.sin(np.radians(wd_v))); v_p.append(-ws_v * np.cos(np.radians(wd_v)))
+            else: u_p.append(0); v_p.append(0)
+        ax.barbs([max_x - 5] * len(h_plot), h_plot, u_p, v_p, color='#D1D5DB', length=6)
         
-        ax.legend(loc='upper left', facecolor='#1B1E23', edgecolor='#3E444E', labelcolor='#D1D5DB')
+        ax.legend(loc='upper left', facecolor='#1B1E23', edgecolor='#3E444E', labelcolor='#D1D5DB', prop={'size': 9})
         plt.figtext(0.14, 0.88, f"Surface Elev: {int(data.get('elevation', 0)*3.28)} ft", color='#A0A4AB', fontsize=10, backgroundcolor='#1B1E23')
 
         st.pyplot(fig)
