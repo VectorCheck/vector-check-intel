@@ -54,40 +54,49 @@ def get_precip_type(code):
     return "Mixed"
 
 def calculate_icing_profile(hourly_data, idx, wx_code):
-    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
-    profile = []
+    """Calculates tactical icing risk using dynamic T/RH spread at pressure altitudes."""
+    icing_severity = "NONE"
+    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
+    
+    # Grab surface temp to check for inversions
+    sfc_t_list = hourly_data.get('temperature_2m')
+    sfc_t = sfc_t_list[idx] if sfc_t_list else 0
+    inversion_detected = False
+    
     for p in p_levels:
-        t_v = hourly_data.get(f"temperature_{p}hPa")[idx]
-        td_v = hourly_data.get(f"dewpoint_{p}hPa")[idx]
-        h_m = hourly_data.get(f"geopotential_height_{p}hPa")[idx]
-        if t_v is not None and td_v is not None and h_m is not None:
-            profile.append({"p": p, "t": t_v, "td": td_v, "h_ft": h_m * 3.28084})
-    
-    cloud_layers = []
-    curr = {"base": None, "top": None, "min_t": 100, "max_t": -100, "inv": False}
-    for i, lvl in enumerate(profile):
-        if (lvl["t"] - lvl["td"]) <= 3.0:
-            if curr["base"] is None: 
-                curr["base"] = lvl["h_ft"]
-                curr["bottom_t"] = lvl["t"]
-            curr["top"] = lvl["h_ft"]
-            curr["min_t"] = min(curr["min_t"], lvl["t"])
-            curr["max_t"] = max(curr["max_t"], lvl["t"])
-            if i > 0 and lvl["t"] > profile[i-1]["t"]: curr["inv"] = True
-        else:
-            if curr["base"] is not None:
-                curr["thick"] = curr["top"] - curr["base"]
-                cloud_layers.append(curr)
-                curr = {"base": None, "top": None, "min_t": 100, "max_t": -100, "inv": False}
-    
-    if wx_code in [66, 67, 56, 57]: return {"type": "CLR (FZRA)", "sev": "SEV", "base": 0, "top": 10000}
-    for layer in cloud_layers:
-        if layer["max_t"] <= 0.5:
-            i_t, i_s = "RIME", "LGT"
-            if layer["thick"] > 1500 or layer["inv"]: i_t, i_s = "MXD", "MOD"
-            if layer["thick"] > 4000: i_s = "SEV"
-            return {"type": i_t, "sev": i_s, "base": layer["base"], "top": layer["top"]}
-    return {"type": "NONE", "sev": "NONE", "base": 99999, "top": -99999}
+        t_list = hourly_data.get(f"temperature_{p}hPa")
+        rh_list = hourly_data.get(f"relative_humidity_{p}hPa")
+        
+        # Ensure the API actually returned these layers before calculating
+        if t_list and rh_list:
+            t_v = t_list[idx]
+            rh_v = rh_list[idx]
+            
+            if t_v is not None and rh_v is not None:
+                # 1. Calculate Dewpoint dynamically: Td = T - ((100 - RH) / 5)
+                td_v = t_v - ((100 - rh_v) / 5.0)
+                spread = abs(t_v - td_v)
+                
+                # 2. Inversion Tracking for Freezing Rain (FZRA)
+                if sfc_t is not None and sfc_t < 0 and t_v > 0:
+                    inversion_detected = True
+                
+                # 3. Micro-Layer Saturation Sensitivity
+                if t_v <= 0 and spread <= 3.0:
+                    if icing_severity == "NONE":
+                        icing_severity = "LGT RIME"
+                    if t_v >= -8: # Warmer sub-zero temps carry mixed/clear ice risk
+                        icing_severity = "MOD MXD"
+                        
+    # Final Escalation Logic
+    if inversion_detected:
+        icing_severity = "SEV FZRA"
+        
+    # WMO Weather Code Override
+    if wx_code in [56, 57, 66, 67]:
+        icing_severity = "SEV FZRA"
+        
+    return icing_severity
 
 def get_turb_ice(alt, spd, w_spd, cur_gst, wx, is_stable, icing_cond):
     sh_1k = ((spd - w_spd) / alt) * 1000 if alt > 0 else 0
