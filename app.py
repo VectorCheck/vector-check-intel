@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import math
+import re
 from datetime import datetime, timezone
 
 # Import Vector Check Modules
@@ -130,9 +131,24 @@ if data and "hourly" in data:
     df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
     st.table(df_ext)
 
-    # --- CSV EXPORT ENGINE ---
+    # --- ADVANCED CSV EXPORT ENGINE ---
     df_export = pd.concat([df_tactical, df_ext])
-    csv_data = df_export.to_csv().encode('utf-8')
+    
+    # Strip HTML tags and format line breaks for plain text compatibility
+    clean_metar = re.sub('<[^<]+>', '', metar_raw.replace('<br>', ' '))
+    clean_taf = re.sub('<[^<]+>', '', taf_raw.replace('<br>', '\n'))
+    
+    csv_header = (
+        "VECTOR CHECK AERIAL GROUP INC. - MISSION HAZARD MATRIX\n"
+        f"Target ICAO: {icao} | Coordinates: {lat}, {lon}\n"
+        f"Forecast Model: {model_choice} | Valid Time: {selected_time}\n\n"
+        f"METAR/SPECI:\n{clean_metar}\n\n"
+        f"TAF:\n{clean_taf}\n\n"
+        "--- HAZARD STACK (AGL) ---\n"
+    )
+    
+    csv_data = (csv_header + df_export.to_csv()).encode('utf-8')
+    
     st.download_button(
         label="📥 Download Pre-Flight Hazard Matrix (CSV)",
         data=csv_data,
