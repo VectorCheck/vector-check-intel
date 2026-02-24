@@ -33,45 +33,66 @@ def calculate_icing_profile(h, idx, wx):
 
 def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, airframe_class, t_temp):
     """
-    Calculates altitude-specific turbulence and icing, formatted to standard aviation 
-    reporting terminology (LGT/MDT/SEV | MECH/LLWS/CVCTV | CLR/RIME/MXD).
+    Calculates altitude-specific turbulence and icing using manned aviation doctrine
+    scaled to Transport Canada RPA airframe classes.
     """
-    gust_delta = max(0, gust_alt - wind_alt)
-    shear = abs(wind_alt - wind_sfc)
-
-    # 1. DYNAMIC TURBULENCE THRESHOLDS BASED ON AIRFRAME MASS
+    # 1. AIRFRAME SCALING MULTIPLIER
+    # Charts are based on manned/heavy assets. We scale the threshold down for lighter drones.
     if "Micro" in airframe_class:
-        sev_g, mdt_g, lgt_g = 12, 8, 4
+        scale = 0.4
     elif "Small" in airframe_class:
-        sev_g, mdt_g, lgt_g = 15, 10, 5
-    elif "Heavy" in airframe_class:
-        sev_g, mdt_g, lgt_g = 20, 12, 6
-    else: # Rotary / Manned equivalence
-        sev_g, mdt_g, lgt_g = 25, 15, 8
+        scale = 0.6
+    else: 
+        scale = 1.0 # Heavy / Rotary uses exact chart values
 
-    # Assign Turbulence Severity
-    turb_sev = "Nil"
-    if gust_delta >= sev_g or shear >= sev_g:
-        turb_sev = "SEV"
-    elif gust_delta >= mdt_g or shear >= mdt_g:
-        turb_sev = "MDT"
-    elif gust_delta >= lgt_g or shear >= lgt_g:
-        turb_sev = "LGT"
+    # 2. EVALUATE MECHANICAL TURBULENCE (Based on Wind/Gust over Land)
+    mech_wind = max(wind_alt, gust_alt)
+    mech_lvl = 0
+    if mech_wind >= (40 * scale):
+        mech_lvl = 3 # SEV
+    elif mech_wind >= (25 * scale):
+        mech_lvl = 2 # MOD
+    elif mech_wind >= (15 * scale):
+        mech_lvl = 1 # LGT
 
-    # Assign Turbulence Type
-    turb_type = ""
-    if turb_sev != "Nil":
-        # Restrict CVCTV purely to convective precipitation codes (Showers & TS)
-        if wx in [80, 81, 82, 85, 86, 95, 96, 97, 98, 99]:
-            turb_type = "CVCTV"  # Convective
-        elif shear > gust_delta and shear >= mdt_g:
-            turb_type = "LLWS"   # Low-Level Wind Shear
+    # 3. EVALUATE VERTICAL SHEAR (LLWS Proxy per 1000 ft)
+    shear_lvl = 0
+    if alt > 0:
+        # Calculate knots of shear per 1000 feet
+        shear_per_1000 = (abs(wind_alt - wind_sfc) / alt) * 1000
+        if shear_per_1000 >= (10 * scale):
+            shear_lvl = 3 # SEV
+        elif shear_per_1000 >= (6 * scale):
+            shear_lvl = 2 # MOD
+        elif shear_per_1000 >= (3 * scale):
+            shear_lvl = 1 # LGT
+
+    # 4. EVALUATE CONVECTIVE TURBULENCE (Based on WMO Precipitation)
+    conv_lvl = 0
+    if wx in [95, 96, 97, 98, 99]: # Thunderstorms (CB)
+        conv_lvl = 3 # SEV
+    elif wx in [80, 81, 82, 85, 86]: # Showers (CU / TCU)
+        conv_lvl = 2 # MOD
+
+    # 5. DETERMINE DOMINANT THREAT
+    max_threat = max(mech_lvl, shear_lvl, conv_lvl)
+    
+    turb_str = "Nil"
+    if max_threat > 0:
+        # Determine Severity String
+        sev_str = "SEV" if max_threat == 3 else ("MDT" if max_threat == 2 else "LGT")
+        
+        # Determine Mechanism String (Priority: Convective -> Shear -> Mech)
+        if max_threat == conv_lvl:
+            type_str = "CVCTV"
+        elif max_threat == shear_lvl:
+            type_str = "LLWS"
         else:
-            turb_type = "MECH"   # Mechanical
+            type_str = "MECH"
+            
+        turb_str = f"{sev_str} {type_str}"
 
-    turb_str = f"{turb_sev} {turb_type}" if turb_sev != "Nil" else "Nil"
-
-    # 2. ICING PROFILES (Standard lapse rate 2°C per 1,000 ft)
+    # 6. ICING PROFILES (Standard lapse rate 2°C per 1,000 ft)
     t_alt = t_temp - (alt / 1000.0) * 2.0
     ice_sev = "Nil"
     ice_type = ""
