@@ -172,16 +172,27 @@ if data and "hourly" in data:
     # --- NATIVE UNIT PASSTHROUGH ---
     raw_wind_unit = data.get("hourly_units", {}).get("wind_speed_10m", "km/h")
     
-    # Extract Surface Data Without Conversion
+    # Extract Surface Data
     t_temp = h['temperature_2m'][idx]
     rh = h['relative_humidity_2m'][idx]
     w_spd = h['wind_speed_10m'][idx] 
     wx = h['weather_code'][idx]
-    td = t_temp - ((100 - rh) / 5) if (t_temp is not None and rh is not None) else t_temp
+    
+    # August-Roche-Magnus precise dewpoint calculation
+    if t_temp is not None and rh is not None and rh > 0:
+        a = 17.625
+        b = 243.04
+        alpha = math.log(rh / 100.0) + ((a * t_temp) / (b + t_temp))
+        td = (b * alpha) / (a - alpha)
+        c_base = int((t_temp - td) * 400)
+        c_base = max(0, c_base) # Prevent negative bases in super-saturated inversions
+    else:
+        td = t_temp
+        c_base = 10000
+
     sfc_dir = int(h['wind_direction_10m'][idx])
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
     frz_disp = "SFC" if t_temp <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
-    c_base = int((t_temp - td)*400) if (t_temp is not None and td is not None) else 10000
 
     raw_gst = h.get('wind_gusts_10m', [w_spd])[idx]
     gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
