@@ -1,4 +1,30 @@
 # modules/hazard_logic.py
+import re
+
+def apply_tactical_highlights(text):
+    """
+    Parses raw METAR/TAF strings and injects HTML styling for rapid tactical briefings.
+    Applies line breaks for temporal shifts and highlights critical hazards.
+    """
+    if not text or text in ["N/A", "NIL", "UNAVAILABLE"]:
+        return text
+        
+    # 1. Structural Spacing (TAF Temporal Markers)
+    text = re.sub(r'\b(FM\d{6})\b', r'<br><span style="color: #60A5FA; font-weight: bold;">\1</span>', text)
+    text = re.sub(r'\b(TEMPO)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #FBBF24; font-weight: bold;">\1</span>', text)
+    text = re.sub(r'\b(BECMG)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #A78BFA; font-weight: bold;">\1</span>', text)
+    text = re.sub(r'\b(PROB\d{2})\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', text)
+    
+    # 2. Critical Hazard Highlighting (Freezing, Thunderstorms, Funnel Clouds)
+    text = re.sub(r'\b([+-]?(?:FZ|TS|GR|FC|PL)[A-Z]*)\b', r'<span class="fz-warn">\1</span>', text)
+    
+    # 3. Low-Level Wind Shear Warning
+    text = re.sub(r'\b(WS\d{3}/\d{5}KT)\b', r'<span style="color: #ff4b4b; font-weight: bold; border-bottom: 2px solid #ff4b4b;">\1</span>', text)
+    
+    # 4. Low Ceilings / IFR Visual Flags (BKN/OVC under 1000ft or Vertical Visibility)
+    text = re.sub(r'\b(OVC00[0-9]|BKN00[0-9]|VV00[0-9])\b', r'<span class="ifr-text">\1</span>', text)
+
+    return text
 
 def get_precip_type(wx_code):
     """
@@ -46,29 +72,23 @@ def get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class
     """
     Efficacy-Audited Turbulence & Icing Engine.
     Scales hazard severity based purely on Transport Canada airframe weight classifications.
-    VTOL aerodynamic considerations have been stripped.
     """
     gust_spread = max(0, g_c - s_c)
     turb_risk = "NIL"
     
-    # Define scaling thresholds based purely on weight class
     if "Micro" in airframe_class:
         sev_spread, sev_sus, sev_gst = 10, 15, 20
         mod_spread, mod_sus = 5, 10
-        
     elif "Small" in airframe_class:
         sev_spread, sev_sus, sev_gst = 15, 25, 30
         mod_spread, mod_sus = 10, 15
-            
     elif "Heavy" in airframe_class:
         sev_spread, sev_sus, sev_gst = 20, 35, 40
         mod_spread, mod_sus = 15, 25
-            
     else: # Rotary (Helicopter)
         sev_spread, sev_sus, sev_gst = 25, 45, 50
         mod_spread, mod_sus = 15, 30
 
-    # 1. EVALUATE TURBULENCE RISK 
     if gust_spread >= sev_spread or s_c >= sev_sus or g_c >= sev_gst or wx in [95, 96, 99]:
         turb_risk = "SEVERE"
     elif gust_spread >= mod_spread or s_c >= mod_sus or (not is_stable and alt <= 400 and s_c >= mod_sus - 5):
@@ -76,7 +96,6 @@ def get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class
     elif gust_spread >= (mod_spread / 2) or s_c >= (mod_sus / 2) or not is_stable:
         turb_risk = "LIGHT"
 
-    # 2. EVALUATE ICING RISK
     ice_risk = icing_cond
     if "Rotary" in airframe_class and ice_risk in ["TRACE (Ice Crystals)", "LIGHT (Rime)"]:
         ice_risk = "MODERATE (Rotor Degradation)"
