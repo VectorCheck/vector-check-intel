@@ -164,18 +164,15 @@ if data and "hourly" in data:
     t_950 = h.get('temperature_950hPa', [t_temp])[idx]
     is_stable = t_950 is not None and t_950 > (t_temp - 2.0)
 
-    # --- ASTRONOMICAL & SPACE WEATHER SECTION ---
+    # --- ASTRONOMICAL SECTION ---
     dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
     astro = get_astronomical_data(lat, lon, dt_utc_exact, local_tz, tz_abbr)
-    space_data = get_kp_index(dt_utc_exact)
     
     sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL (Below Horizon)"
     moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL (Below Horizon)"
     
     st.divider()
-    st.subheader(f"Light Profile & Space Weather ({astro['tz']})")
-    
-    # Row 1: Light Data
+    st.subheader(f"Light Profile ({astro['tz']})")
     ac1, ac2, ac3, ac4, ac5 = st.columns(5)
     ac1.metric("Dawn (Civil)", astro['dawn'])
     ac2.metric("Sunrise", astro['sunrise'])
@@ -190,19 +187,29 @@ if data and "hourly" in data:
     mc4.metric("Moon Pos", moon_pos_display)
     mc5.empty()
 
-    # Row 2: Space Weather Data
-    st.markdown("<br>", unsafe_allow_html=True)
-    sc1, sc2, sc3 = st.columns([1, 1, 3])
-    sc1.metric("Planetary Kp Index", space_data['kp'])
+    # --- SPACE WEATHER SECTION (NEW METAR-STYLE BLOCK) ---
+    space_data = get_kp_index(dt_utc_exact)
+    st.divider()
+    st.subheader("Space Weather (GNSS & C2 Link)")
     
-    # Color-code the GNSS Risk natively using markdown formatting if it hits 5 or above
-    if space_data['risk'] in ["HIGH (G1)", "SEVERE (G2+)"]:
-        sc2.markdown(f'<div data-testid="stMetricValue" style="font-size: 1.2rem !important; color: #ff4b4b !important;">{space_data["risk"]}</div>', unsafe_allow_html=True)
-        sc2.caption("GNSS/C2 RISK")
-    else:
-        sc2.metric("GNSS/C2 Risk", space_data['risk'])
-        
-    sc3.info(f"**Operational Impact:** {space_data['impact']}")
+    # Conditional formatting for the risk text
+    risk_color = "#ff4b4b" if space_data['risk'] in ["HIGH (G1)", "SEVERE (G2+)"] else "#D1D5DB"
+    
+    space_wx_html = f"""
+    <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
+        <div class="obs-text">
+            <strong style="color: #8E949E;">PLANETARY KP INDEX:</strong> 
+            <span style="color: #E58E26; font-size: 1.1rem; font-weight: bold;">{space_data['kp']}</span> 
+            &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; 
+            <strong style="color: #8E949E;">GNSS RISK:</strong> 
+            <span style="color: {risk_color}; font-weight: bold; font-size: 1.1rem;">{space_data['risk']}</span>
+            <br><br>
+            <strong style="color: #8E949E;">OPERATIONAL IMPACT:</strong><br>
+            {space_data['impact']}
+        </div>
+    </div>
+    """
+    st.markdown(space_wx_html, unsafe_allow_html=True)
 
     st.divider()
 
@@ -238,7 +245,7 @@ if data and "hourly" in data:
     df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
     st.table(df_ext)
 
-    # --- ADVANCED CSV EXPORT ENGINE WITH TELEMETRY CALLBACK ---
+    # --- ADVANCED CSV EXPORT ENGINE ---
     df_export = pd.concat([df_tactical, df_ext])
     
     clean_metar = re.sub('<[^<]+>', '', metar_raw.replace('<br>', ' '))
