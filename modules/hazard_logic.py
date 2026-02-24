@@ -34,18 +34,18 @@ def calculate_icing_profile(h, idx, wx):
 def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, airframe_class, t_temp):
     """
     Calculates altitude-specific turbulence and icing using manned aviation doctrine
-    scaled to Transport Canada RPA airframe classes.
+    scaled to Transport Canada RPA airframe classes where physically appropriate.
     """
-    # 1. AIRFRAME SCALING MULTIPLIER
-    # Charts are based on manned/heavy assets. We scale the threshold down for lighter drones.
+    # 1. AIRFRAME SCALING FOR MECHANICAL TURBULENCE ONLY
+    # Mechanical turbulence scales with mass. 
     if "Micro" in airframe_class:
         scale = 0.4
     elif "Small" in airframe_class:
         scale = 0.6
     else: 
-        scale = 1.0 # Heavy / Rotary uses exact chart values
+        scale = 1.0 # Heavy / Rotary uses exact manned chart values
 
-    # 2. EVALUATE MECHANICAL TURBULENCE (Based on Wind/Gust over Land)
+    # 2. EVALUATE MECHANICAL TURBULENCE (Absolute Wind/Gust over Land)
     mech_wind = max(wind_alt, gust_alt)
     mech_lvl = 0
     if mech_wind >= (40 * scale):
@@ -55,24 +55,25 @@ def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, a
     elif mech_wind >= (15 * scale):
         mech_lvl = 1 # LGT
 
-    # 3. EVALUATE VERTICAL SHEAR (LLWS Proxy per 1000 ft)
+    # 3. EVALUATE VERTICAL SHEAR (Atmospheric Gradient)
     shear_lvl = 0
     if alt > 0:
-        # Calculate knots of shear per 1000 feet
+        # Calculate bulk shear rate per 1000 feet from surface to target altitude
         shear_per_1000 = (abs(wind_alt - wind_sfc) / alt) * 1000
-        if shear_per_1000 >= (10 * scale):
+        
+        # Shear severity strictly follows meteorological doctrine without airframe scaling.
+        # >10kt/1000' is Severe CAT/Shear. 
+        if shear_per_1000 >= 10:
             shear_lvl = 3 # SEV
-        elif shear_per_1000 >= (6 * scale):
+        elif shear_per_1000 >= 6:
             shear_lvl = 2 # MOD
-        elif shear_per_1000 >= (3 * scale):
+        elif shear_per_1000 >= 3:
             shear_lvl = 1 # LGT
 
     # 4. EVALUATE CONVECTIVE TURBULENCE (Based on WMO Precipitation)
     conv_lvl = 0
-    if wx in [95, 96, 97, 98, 99]: # Thunderstorms (CB)
-        conv_lvl = 3 # SEV
-    elif wx in [80, 81, 82, 85, 86]: # Showers (CU / TCU)
-        conv_lvl = 2 # MOD
+    if wx in [80, 81, 82, 85, 86, 95, 96, 97, 98, 99]: 
+        conv_lvl = 3 if wx >= 95 else 2 # SEV for TS, MOD for Showers
 
     # 5. DETERMINE DOMINANT THREAT
     max_threat = max(mech_lvl, shear_lvl, conv_lvl)
@@ -86,7 +87,8 @@ def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, a
         if max_threat == conv_lvl:
             type_str = "CVCTV"
         elif max_threat == shear_lvl:
-            type_str = "LLWS"
+            # Differentiate between boundary layer LLWS and upper-level shear
+            type_str = "LLWS" if alt <= 2000 else "SHEAR"
         else:
             type_str = "MECH"
             
