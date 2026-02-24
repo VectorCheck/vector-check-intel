@@ -378,16 +378,16 @@ if data and "hourly" in data:
     
     st.subheader(f"Actuals ({icao})")
     
-    # Render with absolute strict line-height 1.0 (single space)
+    # Render with optimal line-height 1.3 for readability without double spacing
     st.markdown(f'''
     <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
         <div class="obs-text">
             <strong style="color: #8E949E;">METAR/SPECI</strong><br>
-            <div style="line-height: 1.0; margin-bottom: 15px; margin-top: 5px;">
+            <div style="line-height: 1.3; margin-bottom: 15px; margin-top: 5px;">
                 {metar_disp}
             </div>
             <strong style="color: #8E949E;">TAF</strong><br>
-            <div style="line-height: 1.0; font-size: 0.95rem; margin-top: 5px;">
+            <div style="line-height: 1.3; font-size: 0.95rem; margin-top: 5px;">
                 {taf_disp}
             </div>
         </div>
