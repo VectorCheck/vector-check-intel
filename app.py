@@ -27,6 +27,7 @@ st.markdown("""
     th { text-align: center !important; color: #8E949E !important; font-weight: bold !important; padding: 10px !important; border-bottom: 2px solid #3E444E !important; text-transform: uppercase; }
     td { text-align: center !important; padding: 8px !important; color: #D1D5DB !important; border-bottom: 1px solid #2D3139 !important; }
     .obs-text { font-family: "Source Sans Pro", sans-serif; font-size: 0.95rem; line-height: 1.6; color: #D1D5DB; }
+    div[data-testid="column"] button { width: 100%; padding: 0px; font-size: 0.8rem; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -85,7 +86,7 @@ lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f", key="lat
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="lon_input")
 icao = st.sidebar.text_input("Nearest ICAO", value="CYTR", key="icao_input").upper().strip()
 
-# Transport Canada Airframe Classification (VTOL Stripped)
+# Transport Canada Airframe Classification
 airframe_class = st.sidebar.selectbox(
     "Airframe Class (Transport Canada):", 
     options=[
@@ -97,7 +98,6 @@ airframe_class = st.sidebar.selectbox(
 )
 
 model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
-terrain_type = st.sidebar.selectbox("Terrain Roughness:", options=["Land", "Water", "Mountains"])
 
 def log_refresh_callback():
     st.cache_data.clear()
@@ -121,7 +121,6 @@ metar_raw, taf_raw = get_aviation_weather(icao)
 
 st.title("Atmospheric Risk Management")
 st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.session_state.get('active_operator', 'UNKNOWN')}")
-st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
 st.divider()
 
 # Resolve Target Timezone
@@ -140,8 +139,35 @@ if data and "hourly" in data:
         dt_l = dt_u.astimezone(local_tz)
         times_display.append(f"{dt_u.strftime('%d %b %H:%M')} Z | {dt_l.strftime('%H:%M')} {tz_abbr}")
         
-    selected_time_str = st.sidebar.select_slider("Forecast Hour:", options=times_display, value=times_display[0])
+    # SLIDER STATE MANAGEMENT & QUICK NAVIGATION BUTTONS
+    if "forecast_time_val" not in st.session_state or st.session_state.forecast_time_val not in times_display:
+        st.session_state.forecast_time_val = times_display[0]
+
+    def update_time(offset):
+        try:
+            curr = times_display.index(st.session_state.forecast_time_val)
+            st.session_state.forecast_time_val = times_display[min(len(times_display)-1, curr + offset)]
+        except ValueError:
+            st.session_state.forecast_time_val = times_display[0]
+
+    def reset_time():
+        st.session_state.forecast_time_val = times_display[0]
+
+    selected_time_str = st.sidebar.select_slider(
+        "Forecast Hour:", 
+        options=times_display, 
+        key="forecast_time_val"
+    )
     idx = times_display.index(selected_time_str)
+
+    # Inject Quick Jump Buttons
+    btn_col1, btn_col2, btn_col3, btn_col4 = st.sidebar.columns(4)
+    btn_col1.button("Now", on_click=reset_time)
+    btn_col2.button("+3h", on_click=update_time, args=(3,))
+    btn_col3.button("+6h", on_click=update_time, args=(6,))
+    btn_col4.button("+12h", on_click=update_time, args=(12,))
+
+    st.sidebar.divider()
     
     # --- NATIVE UNIT PASSTHROUGH ---
     raw_wind_unit = data.get("hourly_units", {}).get("wind_speed_10m", "km/h")
@@ -207,7 +233,6 @@ if data and "hourly" in data:
         g_c = s_c + gust_delta
         d_c = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / u_h)) % 360
         
-        # 8-Argument call matching the reverted hazard_logic.py
         turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class)
         
         stack_tactical.append({
@@ -243,8 +268,6 @@ if data and "hourly" in data:
         d_e = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
         
         g_e = s_e + gust_delta
-        
-        # 8-Argument call matching the reverted hazard_logic.py
         turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, airframe_class)
         
         stack_ext.append({
@@ -295,6 +318,12 @@ if data and "hourly" in data:
     """
     st.markdown(space_wx_html, unsafe_allow_html=True)
 
+    st.divider()
+
+    # --- METAR / TAF MOVED HERE ---
+    st.subheader(f"Official Aviation Briefing ({icao})")
+    st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
+    
     st.divider()
 
     # --- ADVANCED CSV EXPORT ENGINE ---
