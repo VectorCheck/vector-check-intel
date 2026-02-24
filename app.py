@@ -139,18 +139,13 @@ if data and "hourly" in data:
         dt_l = dt_u.astimezone(local_tz)
         times_display.append(f"{dt_u.strftime('%d %b %H:%M')} Z | {dt_l.strftime('%H:%M')} {tz_abbr}")
         
-    # --- TIME NAVIGATION LOGIC (NEAREST HOUR + 48HR CAP) ---
     now_utc = datetime.now(timezone.utc)
-    
-    # Calculate time differences to find the index closest to the current live hour
     time_diffs = [abs((datetime.fromisoformat(t).replace(tzinfo=timezone.utc) - now_utc).total_seconds()) for t in h["time"]]
     nearest_idx = time_diffs.index(min(time_diffs))
     
-    # Cap the UI options at exactly +48 hours from the nearest index
     max_idx = min(len(h["time"]) - 1, nearest_idx + 48)
     valid_times_display = times_display[nearest_idx : max_idx + 1]
     
-    # Initialize the session state to the nearest hour
     if "forecast_slider" not in st.session_state or st.session_state.forecast_slider not in valid_times_display:
         st.session_state.forecast_slider = valid_times_display[0]
 
@@ -169,10 +164,7 @@ if data and "hourly" in data:
         key="forecast_slider"
     )
     
-    # The absolute index in the API array for pulling data
     idx = times_display.index(selected_time_str)
-    
-    # The relative hour for UI display (+0 HR to +48 HR)
     relative_hr = valid_times_display.index(selected_time_str)
 
     # Dynamic Forecast Navigator
@@ -186,51 +178,49 @@ if data and "hourly" in data:
 
     st.sidebar.divider()
     
-    # --- NATIVE UNIT PASSTHROUGH ---
-    raw_wind_unit = data.get("hourly_units", {}).get("wind_speed_10m", "km/h")
+    # --- HARD CONVERSION TO KNOTS ---
+    is_kmh = "km/h" in data.get("hourly_units", {}).get("wind_speed_10m", "km/h").lower()
+    k_conv = 0.539957 if is_kmh else 1.0
+    raw_wind_unit = "KT"
     
+    # Helper for rounding directions to nearest 10
+    def format_dir(d, spd):
+        r = int(round(float(d), -1)) % 360
+        if r == 0 and spd > 0: return 360
+        if spd == 0: return 0
+        return r
+
     # Extract Surface Data
     t_temp = h['temperature_2m'][idx]
     rh = h['relative_humidity_2m'][idx]
-    w_spd = h['wind_speed_10m'][idx] 
+    w_spd = h['wind_speed_10m'][idx] * k_conv
     wx = h['weather_code'][idx]
     
-    # August-Roche-Magnus precise dewpoint calculation & Cloud Base Rounding
     if t_temp is not None and rh is not None and rh > 0:
         a = 17.625
         b = 243.04
         alpha = math.log(rh / 100.0) + ((a * t_temp) / (b + t_temp))
         td = (b * alpha) / (a - alpha)
-        
-        # Calculate raw base and ROUND TO NEAREST HUNDRED
         raw_base = max(0, (t_temp - td) * 400)
         c_base = int(round(raw_base, -2)) 
     else:
         td = t_temp
         c_base = 10000
 
-    # Extract wind direction and ROUND TO NEAREST TEN degrees
-    raw_dir = float(h['wind_direction_10m'][idx])
-    sfc_dir = int(round(raw_dir, -1))
-    
-    # Standardize North (360) vs Calm (000)
-    if sfc_dir == 0 and w_spd > 0:
-        sfc_dir = 360
-    elif sfc_dir == 360 and w_spd == 0:
-        sfc_dir = 0
+    sfc_dir = format_dir(h['wind_direction_10m'][idx], w_spd)
 
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
     frz_disp = "SFC" if t_temp <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
 
-    raw_gst = h.get('wind_gusts_10m', [w_spd])[idx]
+    raw_gst = h.get('wind_gusts_10m', [w_spd / k_conv])[idx] * k_conv
     gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
     
     if "gem" in model_api_map[model_choice]:
-        u_v = h['wind_speed_120m'][idx]
+        u_v = h['wind_speed_120m'][idx] * k_conv
         u_dir = h['wind_direction_120m'][idx]
         u_h = 120
     else:
-        u_v = h['wind_speed_100m'][idx]
+        u_v = h['wind_speed_100m'][idx] * k_conv
         u_dir = h['wind_direction_100m'][idx]
         u_h = 100
         
@@ -238,7 +228,6 @@ if data and "hourly" in data:
     t_950 = h.get('temperature_950hPa', [t_temp])[idx]
     is_stable = t_950 is not None and t_950 > (t_temp - 2.0)
 
-    # Pre-calculate astronomical and space weather
     dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
     astro = get_astronomical_data(lat, lon, dt_utc_exact, local_tz, tz_abbr)
     space_data = get_kp_index(dt_utc_exact)
@@ -264,20 +253,20 @@ if data and "hourly" in data:
     st.subheader(f"Tactical Hazard Stack (0-400ft AGL)")
     stack_tactical = []
     
-    # PRE-CALCULATE GUST DELTA TO PREVENT MATH EXPLOSION
     gust_delta = max(0, gst - w_spd)
     
     for alt in [400, 300, 200, 100]:
         s_c = w_spd + (u_v - w_spd) * (math.log(alt*0.3048/10) / math.log(u_h/10))
         g_c = s_c + gust_delta
-        d_c = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / u_h)) % 360
         
-        # Piped t_temp inside get_turb_ice
+        d_c_raw = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / u_h)) % 360
+        d_c = format_dir(d_c_raw, s_c)
+        
         turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class, t_temp)
         
         stack_tactical.append({
             "Alt (AGL)": f"{alt}ft", 
-            "Dir": f"{int(d_c):03d}°", 
+            "Dir": f"{d_c:03d}°", 
             f"Spd ({raw_wind_unit})": int(s_c), 
             f"Gust ({raw_wind_unit})": int(g_c), 
             "Turbulence": turb, 
@@ -290,7 +279,7 @@ if data and "hourly" in data:
     st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
     p_levels_traj = [1000, 950, 925, 900, 850, 800, 700, 600]
     p_profile = sorted([{'h': h.get(f'geopotential_height_{p}hPa')[idx]*3.28, 
-                         's': h.get(f'wind_speed_{p}hPa')[idx], 
+                         's': h.get(f'wind_speed_{p}hPa')[idx] * k_conv, 
                          'd': h.get(f'wind_direction_{p}hPa')[idx]} 
                         for p in p_levels_traj if h.get(f'wind_speed_{p}hPa')[idx] is not None], 
                        key=lambda x: x['h'])
@@ -305,15 +294,16 @@ if data and "hourly" in data:
         
         frac = (alt - blw['h']) / (abv['h'] - blw['h']) if abv['h'] != blw['h'] else 0
         s_e = blw['s'] + frac * (abv['s'] - blw['s'])
-        d_e = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
+        
+        d_e_raw = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
+        d_e = format_dir(d_e_raw, s_e)
         
         g_e = s_e + gust_delta
-        # Piped t_temp inside get_turb_ice
         turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, airframe_class, t_temp)
         
         stack_ext.append({
             "Alt (AGL)": f"{alt}ft", 
-            "Dir": f"{int(d_e):03d}°", 
+            "Dir": f"{d_e:03d}°", 
             f"Spd ({raw_wind_unit})": int(s_e), 
             "Turbulence": turb, 
             "Icing": ice
@@ -361,24 +351,14 @@ if data and "hourly" in data:
 
     st.divider()
 
-    # --- METAR / TAF RENDERING ENGINE ---
-    # 1. Strip away any old HTML tags
     clean_metar = re.sub('<[^<]+>', '', metar_raw)
     clean_taf = re.sub('<[^<]+>', '', taf_raw)
-    
-    # 2. Force single spacing by destroying multi-newlines
     clean_taf = re.sub(r'\n\s*\n', '\n', clean_taf).strip()
-    
-    # 3. Apply the tactical highlights
     metar_disp = apply_tactical_highlights(clean_metar)
     taf_disp = apply_tactical_highlights(clean_taf)
-    
-    # 4. Final conversion to tight breaks
     taf_disp = taf_disp.replace('\n', '<br>')
     
     st.subheader(f"Actuals ({icao})")
-    
-    # Render with optimal line-height 1.3 for readability without double spacing
     st.markdown(f'''
     <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
         <div class="obs-text">
@@ -396,9 +376,7 @@ if data and "hourly" in data:
     
     st.divider()
 
-    # --- ADVANCED CSV EXPORT ENGINE ---
     df_export = pd.concat([df_tactical, df_ext])
-    
     csv_header = (
         "VECTOR CHECK AERIAL GROUP INC. - Atmospheric Risk Assessment\n"
         f"Target ICAO: {icao} | Coordinates: {lat}, {lon}\n"
@@ -438,12 +416,9 @@ if data and "hourly" in data:
     sfc_h = data.get('elevation', 0) * 3.28084
     fig = plot_convective_profile(h, idx, t_temp, td, w_spd, sfc_dir, sfc_h)
     
-    if fig:
-        st.pyplot(fig)
-    else:
-        st.warning("Insufficient atmospheric layers available to render vertical profile.")
+    if fig: st.pyplot(fig)
+    else: st.warning("Insufficient atmospheric layers available to render vertical profile.")
 
-# 7. LIABILITY & TRACKING ARMOR
 st.divider()
 st.markdown("""
 <div style="text-align: center; color: #8E949E; font-size: 0.85rem; padding: 20px;">
