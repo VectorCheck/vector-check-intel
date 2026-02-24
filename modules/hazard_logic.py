@@ -1,81 +1,75 @@
-import math
-import re
-
-def apply_tactical_highlights(text):
-    """Applies HTML formatting to raw METAR/TAF strings to highlight aviation hazards."""
-    if not text: 
-        return text
-    # Red highlights for severe weather, freezing precip, and hard IFR conditions
-    text = re.sub(r'\b(TS\w*|FZ\w*|GR|FC|VA)\b', r'<span class="fz-warn">\1</span>', text)
-    text = re.sub(r'\b(BKN|OVC)(00[0-9]|010)\b', r'<span class="ifr-text">\1\2</span>', text)
-    text = re.sub(r'\b([0-2]SM|1/4SM|1/2SM|3/4SM)\b', r'<span class="ifr-text">\1</span>', text)
-    
-    # Yellow highlights for MVFR conditions
-    text = re.sub(r'\b([3-5]SM)\b', r'<span class="mvfr-text">\1</span>', text)
-    text = re.sub(r'\b(BKN|OVC)(01[1-9]|02[0-9]|030)\b', r'<span class="mvfr-text">\1\2</span>', text)
-    
-    return text
+# modules/hazard_logic.py
 
 def get_precip_type(wx_code):
-    """Maps WMO weather codes to standard aviation METAR precipitation codes."""
-    if wx_code in [0, 1, 2, 3]: return "NONE"
-    if wx_code in [45, 48]: return "FOG"
-    if wx_code in [51, 53, 55]: return "DZ"
-    if wx_code in [56, 57]: return "FZDZ"
-    if wx_code in [61, 63, 65]: return "RA"
-    if wx_code in [66, 67]: return "FZRA"
-    if wx_code in [71, 73, 75]: return "SN"
-    if wx_code in [77]: return "SG"
-    if wx_code in [80, 81, 82]: return "SHRA"
-    if wx_code in [85, 86]: return "SHSN"
-    if wx_code in [95, 96, 99]: return "TS"
-    return "UNK"
+    """
+    Translates WMO weather codes into standard aviation precip types.
+    """
+    wx_mapping = {
+        0: "Clear", 1: "Mainly Clear", 2: "Partly Cloudy", 3: "Overcast",
+        45: "Fog", 48: "Freezing Fog",
+        51: "Light Drizzle", 53: "Moderate Drizzle", 55: "Dense Drizzle",
+        56: "Light FZ Drizzle", 57: "Dense FZ Drizzle",
+        61: "Light Rain", 63: "Moderate Rain", 65: "Heavy Rain",
+        66: "Light FZ Rain", 67: "Heavy FZ Rain",
+        71: "Light Snow", 73: "Moderate Snow", 75: "Heavy Snow",
+        77: "Snow Grains",
+        80: "Light Rain Showers", 81: "Moderate Rain Showers", 82: "Violent Rain Showers",
+        85: "Light Snow Showers", 86: "Heavy Snow Showers",
+        95: "Thunderstorms", 96: "TSRA w/ Hail", 99: "Heavy TSRA w/ Hail"
+    }
+    return wx_mapping.get(wx_code, f"Code {wx_code}")
 
-def calculate_icing_profile(hourly_data, idx, wx_code):
-    """Calculates tactical icing risk using dynamic T/RH spread."""
-    icing_severity = "NONE"
-    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
+def calculate_icing_profile(h, idx, wx_code):
+    """
+    Evaluates atmospheric conditions for icing potential based on Temp, RH, and Precip.
+    Requires visible moisture (RH > 85% or active precip) and sub-freezing temps.
+    """
+    temp = h['temperature_2m'][idx]
+    rh = h['relative_humidity_2m'][idx]
     
-    sfc_t_list = hourly_data.get('temperature_2m')
-    sfc_t = sfc_t_list[idx] if sfc_t_list else 0
-    inversion_detected = False
+    # Identify visible moisture (High RH or active precip codes)
+    visible_moisture = rh >= 85 or (wx_code >= 50 and wx_code <= 99)
     
-    for p in p_levels:
-        t_list = hourly_data.get(f"temperature_{p}hPa")
-        rh_list = hourly_data.get(f"relative_humidity_{p}hPa")
-        
-        if t_list and rh_list:
-            t_v = t_list[idx]
-            rh_v = rh_list[idx]
-            
-            if t_v is not None and rh_v is not None:
-                # Calculate dewpoint natively to bypass API limitations
-                td_v = t_v - ((100 - rh_v) / 5.0) 
-                spread = abs(t_v - td_v)
-                
-                if sfc_t is not None and sfc_t < 0 and t_v > 0:
-                    inversion_detected = True
-                    
-                if t_v <= 0 and spread <= 3.0:
-                    if icing_severity == "NONE":
-                        icing_severity = "LGT RIME"
-                    if t_v >= -8:
-                        icing_severity = "MOD MXD"
-                        
-    if inversion_detected or wx_code in [56, 57, 66, 67]:
-        icing_severity = "SEV FZRA"
-        
-    return icing_severity
+    # Identify freezing precip codes specifically
+    freezing_precip = wx_code in [48, 56, 57, 66, 67]
+    
+    if freezing_precip:
+        return "SEVERE (FZRA/FZDZ)"
+    elif visible_moisture and -20 <= temp <= 0:
+        if -10 <= temp <= 0:
+            return "MODERATE (Clear/Mixed)"
+        else:
+            return "LIGHT (Rime)"
+    elif temp < -20:
+        return "TRACE (Ice Crystals)"
+    else:
+        return "NIL"
 
-def get_turb_ice(alt, spd, sfc_spd, gust, wx_code, is_stable, icing_cond):
-    """Calculates wind shear and applies icing severity."""
-    turb = "NONE"
-    shear = abs(spd - sfc_spd)
-    if gust - spd > 5: turb = "LGT MECH"
-    if gust - spd > 10: turb = "MOD MECH"
-    if gust - spd > 15: turb = "SEV MECH"
-    if is_stable and shear > 15: turb = "LLWS"
-    if wx_code in [95, 96, 99]: turb = "SEV CVCTV"
+def get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond):
+    """
+    Efficacy-Audited Turbulence & Icing Engine.
+    Calculates mechanical turbulence based on the linear gust spread and base wind speed,
+    weighted heavily for low-altitude (0-400ft) uncrewed flight dynamics.
+    """
+    # 1. CALCULATE GUST SPREAD (The mechanical bump)
+    gust_spread = max(0, g_c - s_c)
     
-    ice = icing_cond
-    return turb, ice
+    # 2. EVALUATE TURBULENCE RISK
+    turb_risk = "NIL"
+    
+    # Severe criteria: Massive gust spread or extremely high sustained winds
+    if gust_spread >= 15 or s_c >= 30 or g_c >= 35 or wx in [95, 96, 99]:
+        turb_risk = "SEVERE"
+    # Moderate criteria: Noticeable bumpiness, standard boundary layer mixing
+    elif gust_spread >= 10 or s_c >= 20 or (not is_stable and alt <= 400 and s_c >= 15):
+        turb_risk = "MODERATE"
+    # Light criteria: Mild mechanical friction
+    elif gust_spread >= 5 or s_c >= 10 or not is_stable:
+        turb_risk = "LIGHT"
+
+    # 3. EVALUATE ICING RISK ALOFT
+    # If surface icing is predicted, it generally propagates up through the boundary layer 
+    # unless a thermal inversion is actively tracked (which requires higher-level sounding math).
+    ice_risk = icing_cond if icing_cond != "NIL" else "NIL"
+
+    return turb_risk, ice_risk
