@@ -5,7 +5,7 @@ def apply_tactical_highlights(text):
     """
     Parses raw METAR/TAF strings and injects HTML styling for rapid tactical briefings.
     Isolates temporal periods to ensure only the lowest flight category is highlighted.
-    Colors strict to EFB Standard: LIFR (Magenta), IFR (Red), MVFR (Blue).
+    Colors strict to Vector Check Standard: LIFR (Orange), IFR (Red), MVFR (Yellow).
     """
     if not text or text in ["N/A", "NIL", "UNAVAILABLE"]:
         return text
@@ -36,19 +36,19 @@ def apply_tactical_highlights(text):
         period = re.sub(r'\b([+-]?(?:FZ|TS|GR|FC(?!ST)|PL)[A-Z]*)\b', r'<span style="background-color: #FF4B4B; color: white; padding: 2px; border-radius: 3px; font-weight: bold;">\1</span>', period)
         period = re.sub(r'\b(WS\d{3}/\d{5}KT)\b', r'<span style="color: #FF4B4B; font-weight: bold; border-bottom: 2px solid #FF4B4B;">\1</span>', period)
 
-        # 3. Apply Strict Lowest-Category Highlighting (EFB Standard Colors)
+        # 3. Apply Strict Lowest-Category Highlighting (Vector Check Standard Colors)
         if is_lifr:
-            # LIFR = Magenta (#E879F9)
-            period = re.sub(r'\b(OVC00[0-4]|BKN00[0-4]|VV00[0-4])\b', r'<span style="color: #E879F9; font-weight: bold;">\1</span>', period)
-            period = re.sub(r'\b(0SM|M?1/[248]SM|3/4SM)\b', r'<span style="color: #E879F9; font-weight: bold;">\1</span>', period)
+            # LIFR = Orange (#FF9800)
+            period = re.sub(r'\b(OVC00[0-4]|BKN00[0-4]|VV00[0-4])\b', r'<span style="color: #FF9800; font-weight: bold;">\1</span>', period)
+            period = re.sub(r'\b(0SM|M?1/[248]SM|3/4SM)\b', r'<span style="color: #FF9800; font-weight: bold;">\1</span>', period)
         elif is_ifr:
             # IFR = Red (#FF4B4B)
             period = re.sub(r'\b(OVC00[5-9]|BKN00[5-9]|VV00[5-9])\b', r'<span style="color: #FF4B4B; font-weight: bold;">\1</span>', period)
             period = re.sub(r'\b([1-2]SM|[1-2]\s?[1-3]/[248]SM)\b', r'<span style="color: #FF4B4B; font-weight: bold;">\1</span>', period)
         elif is_mvfr:
-            # MVFR = Blue (#60A5FA)
-            period = re.sub(r'\b(OVC0[1-2][0-9]|OVC030|BKN0[1-2][0-9]|BKN030)\b', r'<span style="color: #60A5FA; font-weight: bold;">\1</span>', period)
-            period = re.sub(r'\b([3-5]SM)\b', r'<span style="color: #60A5FA; font-weight: bold;">\1</span>', period)
+            # MVFR = Yellow (#FBBF24)
+            period = re.sub(r'\b(OVC0[1-2][0-9]|OVC030|BKN0[1-2][0-9]|BKN030)\b', r'<span style="color: #FBBF24; font-weight: bold;">\1</span>', period)
+            period = re.sub(r'\b([3-5]SM)\b', r'<span style="color: #FBBF24; font-weight: bold;">\1</span>', period)
 
         # 4. Structural Spacing (Line breaks for temporal markers)
         period = re.sub(r'\b(FM\d{6})\b', r'<br><span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
