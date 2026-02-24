@@ -34,7 +34,7 @@ def calculate_icing_profile(h, idx, wx):
 def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, airframe_class, t_temp):
     """
     Calculates altitude-specific turbulence and icing using explicit meteorological doctrine.
-    Strictly segregates boundary layer (MECH/LLWS) from upper-level (SHEAR).
+    Strictly aligns with TAF/Tac Prog thresholds and segregates boundary layer from upper-level shear.
     """
     # 1. BASE VARIABLES
     shear_total = abs(wind_alt - wind_sfc)
@@ -45,50 +45,52 @@ def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, a
     scale = 0.4 if "Micro" in airframe_class else (0.6 if "Small" in airframe_class else 1.0)
 
     # 2. EVALUATE CONVECTIVE TURBULENCE (Global Altitude)
+    # Doctrine: CU/TCU (Showers) = MOD. CB (Thunderstorms) = SEV.
     conv_lvl = 0
     if wx in [80, 81, 82, 85, 86, 95, 96, 97, 98, 99]: 
-        conv_lvl = 3 if wx >= 95 else 2 # SEV for TS, MOD for Showers
+        conv_lvl = 3 if wx >= 95 else 2 
 
-    # 3. EVALUATE ALTITUDE-DEPENDENT THREATS
     threats = []
     if conv_lvl > 0:
         threats.append((conv_lvl, "CVCTV"))
 
-    if alt <= 3000:
-        # --- BOUNDARY LAYER LOGIC (<= 3000 ft) ---
-        
-        # A. LLWS Doctrine Thresholds
-        # Note: PIREP logic (+/- 20kts < 1500ft) is acknowledged but requires future API integration
-        is_llws = False
-        if (shear_rate_1000 >= 20) or \
-           (alt <= 500 and shear_total >= 25) or \
-           (alt <= 1000 and shear_total >= 40) or \
-           (alt <= 1500 and shear_total >= 50):
-            is_llws = True
-            
-        # B. MECH Doctrine Thresholds (Scaled)
-        mech_lvl = 0
+    # 3. EVALUATE LOW LEVEL WIND SHEAR (LLWS)
+    # Doctrine Thresholds (TAF & Tac Prog combined)
+    is_llws = False
+    if (alt <= 5000 and shear_rate_1000 >= 20) or \
+       (alt <= 500 and shear_total >= 25) or \
+       (alt <= 1000 and shear_total >= 40) or \
+       (alt <= 1500 and shear_total >= 50):
+        is_llws = True
+
+    # 4. EVALUATE MECHANICAL TURBULENCE (MECH)
+    # Doctrine: Top of boundary layer is 3000-4000' AGL.
+    mech_lvl = 0
+    if alt <= 4000:
         if mech_wind >= (40 * scale): mech_lvl = 3
         elif mech_wind >= (25 * scale): mech_lvl = 2
         elif mech_wind >= (15 * scale): mech_lvl = 1
 
-        # C. Mutual Exclusivity Application
-        if is_llws:
-            threats.append((3, "LLWS")) # Doctrine thresholds dictate Severe LLWS
-        elif mech_lvl > 0:
-            threats.append((mech_lvl, "MECH"))
-            
-    else:
-        # --- UPPER LEVEL LOGIC (> 3000 ft) ---
-        shear_lvl = 0
+    # 5. EVALUATE CLEAR AIR / FRONTAL SHEAR (Upper Levels)
+    # Evaluated only outside the boundary layer
+    shear_lvl = 0
+    if alt > 4000:
         if shear_rate_1000 >= 10: shear_lvl = 3
         elif shear_rate_1000 >= 6: shear_lvl = 2
         elif shear_rate_1000 >= 3: shear_lvl = 1
-        
-        if shear_lvl > 0:
+
+    # 6. MUTUAL EXCLUSIVITY AND CONFLICT RESOLUTION
+    if is_llws:
+        # LLWS suppresses MECH and SHEAR
+        threats.append((3, "LLWS")) 
+    else:
+        # If no LLWS, evaluate MECH (low level) or SHEAR (upper level)
+        if mech_lvl > 0: 
+            threats.append((mech_lvl, "MECH"))
+        if shear_lvl > 0: 
             threats.append((shear_lvl, "SHEAR"))
 
-    # 4. RESOLVE DOMINANT TURBULENCE
+    # 7. RESOLVE DOMINANT TURBULENCE
     turb_str = "Nil"
     if threats:
         # Sort by highest severity first
@@ -98,7 +100,7 @@ def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, a
         sev_str = "SEV" if top_sev == 3 else ("MDT" if top_sev == 2 else "LGT")
         turb_str = f"{sev_str} {top_type}"
 
-    # 5. ICING PROFILES (Standard lapse rate 2°C per 1,000 ft)
+    # 8. ICING PROFILES (Standard lapse rate 2°C per 1,000 ft)
     t_alt = t_temp - (alt / 1000.0) * 2.0
     ice_sev = "Nil"
     ice_type = ""
