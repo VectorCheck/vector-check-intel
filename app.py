@@ -359,7 +359,7 @@ if data and "hourly" in data:
             <strong style="color: #8E949E;">METAR/SPECI</strong><br>
             {metar_disp}<br><br>
             <strong style="color: #8E949E;">TAF</strong><br>
-            <div style="line-height: 1.2; font-family: monospace; font-size: 0.95rem; margin-top: 5px;">
+            <div style="line-height: 1.2; font-size: 0.95rem; margin-top: 5px;">
                 {taf_disp}
             </div>
         </div>
