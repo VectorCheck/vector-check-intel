@@ -8,7 +8,7 @@ import pytz
 
 # Import Vector Check Modules
 from modules.data_ingest import get_aviation_weather, fetch_mission_data
-from modules.hazard_logic import get_precip_type, calculate_icing_profile, get_turb_ice
+from modules.hazard_logic import get_precip_type, calculate_icing_profile, get_turb_ice, apply_tactical_highlights
 from modules.visualizations import plot_convective_profile
 from modules.telemetry import log_action
 from modules.astronomy import get_astronomical_data
