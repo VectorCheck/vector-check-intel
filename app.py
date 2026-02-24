@@ -132,7 +132,7 @@ if data and "hourly" in data:
     selected_time_str = st.sidebar.select_slider("Forecast Hour:", options=times_display, value=times_display[0])
     idx = times_display.index(selected_time_str)
     
-    # --- BULLETPROOF QC: NATIVE UNIT PASSTHROUGH ---
+    # --- NATIVE UNIT PASSTHROUGH ---
     raw_wind_unit = data.get("hourly_units", {}).get("wind_speed_10m", "km/h")
     
     # Extract Surface Data Without Conversion
@@ -187,11 +187,19 @@ if data and "hourly" in data:
 
     st.subheader("Tactical Hazard Stack (0-400ft AGL)")
     stack_tactical = []
+    
+    # PRE-CALCULATE GUST DELTA TO PREVENT MATH EXPLOSION
+    gust_delta = max(0, gst - w_spd)
+    
     for alt in [400, 300, 200, 100]:
         s_c = w_spd + (u_v - w_spd) * (math.log(alt*0.3048/10) / math.log(u_h/10))
-        g_c = s_c * (gst / max(w_spd, 1))
+        
+        # APPLY LINEAR DELTA INSTEAD OF RATIO MULTIPLIER
+        g_c = s_c + gust_delta
+        
         d_c = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / u_h)) % 360
         turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond)
+        
         stack_tactical.append({
             "Alt (AGL)": f"{alt}ft", 
             "Dir": f"{int(d_c):03d}°", 
