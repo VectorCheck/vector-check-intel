@@ -42,10 +42,11 @@ def apply_tactical_highlights(text):
 def get_precip_type(wx_code):
     """
     Translates WMO weather codes into standard aviation precip types.
+    Strict compliance: Returns 'NIL' for non-precipitation states.
     """
     wx_mapping = {
-        0: "Clear", 1: "Mainly Clear", 2: "Partly Cloudy", 3: "Overcast",
-        45: "Fog", 48: "Freezing Fog",
+        0: "NIL", 1: "NIL", 2: "NIL", 3: "NIL",
+        45: "NIL (Fog)", 48: "Freezing Fog",
         51: "Light Drizzle", 53: "Moderate Drizzle", 55: "Dense Drizzle",
         56: "Light FZ Drizzle", 57: "Dense FZ Drizzle",
         61: "Light Rain", 63: "Moderate Rain", 65: "Heavy Rain",
@@ -56,7 +57,7 @@ def get_precip_type(wx_code):
         85: "Light Snow Showers", 86: "Heavy Snow Showers",
         95: "Thunderstorms", 96: "TSRA w/ Hail", 99: "Heavy TSRA w/ Hail"
     }
-    return wx_mapping.get(wx_code, f"Code {wx_code}")
+    return wx_mapping.get(wx_code, "NIL")
 
 def calculate_icing_profile(h, idx, wx_code):
     """
