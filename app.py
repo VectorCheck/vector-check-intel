@@ -313,6 +313,7 @@ else:
 
 sfc_dir = format_dir(h['wind_direction_10m'][idx], w_spd)
 
+# Fully robust fallback for Freezing Level Height
 frz_raw_list = h.get('freezing_level_height')
 frz_raw = frz_raw_list[idx] if frz_raw_list is not None else None
 frz_disp = "SFC" if t_temp <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
@@ -415,7 +416,6 @@ p_profile = sorted([{'h': h.get(f'geopotential_height_{p}hPa')[idx]*3.28,
 stack_ext = []
 
 if not p_profile:
-    # Fail-safe if upper air arrays are completely empty
     for alt in [5000, 4000, 3000, 2000, 1000]:
         stack_ext.append({
             "Alt (AGL)": f"{alt}ft", 
