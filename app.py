@@ -72,30 +72,26 @@ if not check_password():
     st.stop()
 
 # ---------------------------------------------------------
-# SPATIAL ENGINE: AUTO-LOCATE NEAREST TAF STATION
+# SPATIAL ENGINE: AUTO-LOCATE NEAREST TAF STATION & BEARING
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_nearest_icao_station(user_lat, user_lon):
-    """Spatially queries the modern AWC JSON API using a bounding box, strictly locked to 50km."""
+    """Spatially queries the AWC JSON API, locks to 50km, and computes cardinal bearing."""
     try:
-        # A 1-degree coordinate bounding box creates a ~111km square search grid, ensuring 
-        # we capture all candidate stations before the strict 50km Haversine formula filters them.
         min_lat = user_lat - 1.0
         max_lat = user_lat + 1.0
         min_lon = user_lon - 1.0
         max_lon = user_lon + 1.0
         
-        # Modern AWC JSON Endpoint
         url = f"https://aviationweather.gov/api/data/taf?bbox={min_lat},{min_lon},{max_lat},{max_lon}&format=json"
         
         req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode('utf-8'))
         
-        best_station = {"icao": "NONE", "dist": float('inf')}
+        best_station = {"icao": "NONE", "dist": float('inf'), "dir": ""}
         seen_icaos = set()
         
-        # The JSON API returns an array of TAF dictionaries
         for taf in data:
             if 'icaoId' not in taf or 'lat' not in taf or 'lon' not in taf:
                 continue
@@ -108,7 +104,7 @@ def get_nearest_icao_station(user_lat, user_lon):
             stn_lat = float(taf['lat'])
             stn_lon = float(taf['lon'])
             
-            # Spherical Haversine calculation for exact kilometers over the Earth's curvature
+            # Spherical Haversine calculation for exact kilometers
             R = 6371.0 
             lat1, lon1 = math.radians(user_lat), math.radians(user_lon)
             lat2, lon2 = math.radians(stn_lat), math.radians(stn_lon)
@@ -120,11 +116,20 @@ def get_nearest_icao_station(user_lat, user_lon):
             c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
             dist = R * c
             
-            # STRICT DOCTRINE LIMIT: Must be <= 50.0 km
             if dist <= 50.0 and dist < best_station["dist"]:
+                # Calculate True Bearing
+                y = math.sin(dlon) * math.cos(lat2)
+                x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+                bearing = (math.degrees(math.atan2(y, x)) + 360) % 360
+                
+                # Map to 8-Point Cardinal Compass
+                dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+                cardinal_idx = int(round(bearing / 45)) % 8
+                
                 best_station = {
                     "icao": icao_code,
-                    "dist": dist
+                    "dist": dist,
+                    "dir": dirs[cardinal_idx]
                 }
         
         if best_station["icao"] != "NONE":
@@ -133,8 +138,7 @@ def get_nearest_icao_station(user_lat, user_lon):
     except Exception as e:
         pass
     
-    # Graceful fallback if nothing is within 50km or API fails
-    return {"icao": "NONE", "dist": None}
+    return {"icao": "NONE", "dist": None, "dir": ""}
 
 # ---------------------------------------------------------
 # MAIN DASHBOARD EXECUTION
@@ -156,12 +160,12 @@ lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="l
 station_data = get_nearest_icao_station(lat, lon)
 icao = station_data["icao"]
 stn_dist = station_data["dist"]
+stn_dir = station_data["dir"]
 
 # Locked UI Element
 display_icao = icao if icao != "NONE" else "N/A"
 st.sidebar.text_input("Nearest Valid ICAO (Auto-Locked)", value=display_icao, disabled=True)
 
-# Uncolored, consistent sidebar text
 if icao == "NONE":
     st.sidebar.markdown("<div style='font-size: 0.85rem; color: #8E949E; margin-bottom: 15px;'>No TAF-issuing station within 50km.</div>", unsafe_allow_html=True)
 
@@ -197,7 +201,7 @@ model_api_map = {
 
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 
-# Controlled Fetch to avoid bad API calls
+# Controlled Fetch
 if icao != "NONE":
     metar_raw, taf_raw = get_aviation_weather(icao)
 else:
@@ -318,10 +322,8 @@ if data and "hourly" in data:
     sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL (Below Horizon)"
     moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL (Below Horizon)"
 
-    # Variable capture for shared UI and CSV alignment
     weather_str = get_weather_element(wx, w_spd)
 
-    # UI Display override for Calm / VRB logic
     if int(w_spd) == 0:
         sfc_dir_disp = "CALM"
         sfc_spd_disp = "0"
@@ -462,22 +464,40 @@ if data and "hourly" in data:
 
     st.divider()
 
-    # Controlled Rendering of Station Actuals based on 50km Rule
     if icao == "NONE":
         st.subheader("Station Actuals")
-        # Uncolored, consistent markdown text
         st.markdown('<div class="obs-text">No METAR/TAF information within a 50km radius.</div>', unsafe_allow_html=True)
         clean_metar = "NIL"
         clean_taf = "NIL"
     else:
         clean_metar = re.sub('<[^<]+>', '', metar_raw)
-        clean_taf = re.sub('<[^<]+>', '', taf_raw)
-        clean_taf = re.sub(r'\n\s*\n', '\n', clean_taf).strip()
+        
+        # --- TAF FORMATTING ENGINE ---
+        raw_taf_no_html = re.sub('<[^<]+>', '', taf_raw)
+        
+        # Strictly purge any empty ghost lines before applying index logic
+        taf_lines = [line.strip() for line in raw_taf_no_html.split('\n') if line.strip()]
+        
+        ui_taf_lines = []
+        csv_taf_lines = []
+        
+        for i, line in enumerate(taf_lines):
+            # Keep Line 0, the very last real text line, and FM lines perfectly flush
+            if i == 0 or i == len(taf_lines) - 1 or line.startswith("FM"):
+                ui_taf_lines.append(line)
+                csv_taf_lines.append(line)
+            else:
+                ui_taf_lines.append("&nbsp;&nbsp;&nbsp;&nbsp;" + line)
+                csv_taf_lines.append("    " + line)
+                
+        ui_rebuilt_taf = '\n'.join(ui_taf_lines)
+        clean_taf = '\n'.join(csv_taf_lines)
+        
         metar_disp = apply_tactical_highlights(clean_metar)
-        taf_disp = apply_tactical_highlights(clean_taf)
+        taf_disp = apply_tactical_highlights(ui_rebuilt_taf)
         taf_disp = taf_disp.replace('\n', '<br>')
         
-        st.subheader(f"Station Actuals: {icao} | {stn_dist:.1f} km from AO")
+        st.subheader(f"Station Actuals: {icao} | {stn_dist:.1f} km {stn_dir} of AO")
         st.markdown(f'''
         <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
             <div class="obs-text">
@@ -486,7 +506,7 @@ if data and "hourly" in data:
                     {metar_disp}
                 </div>
                 <strong style="color: #8E949E;">TAF</strong><br>
-                <div style="line-height: 1.3; font-size: 0.95rem; margin-top: 5px;">
+                <div style="line-height: 1.3; font-size: 0.95rem; margin-top: 5px; font-family: monospace;">
                     {taf_disp}
                 </div>
             </div>
@@ -497,7 +517,7 @@ if data and "hourly" in data:
 
     df_export = pd.concat([df_tactical, df_ext])
     
-    stn_display_str = f"{icao} | Distance: {stn_dist:.1f} km" if icao != "NONE" else "No METAR/TAF information within a 50km radius."
+    stn_display_str = f"{icao} | {stn_dist:.1f} km {stn_dir} of AO" if icao != "NONE" else "No METAR/TAF information within a 50km radius."
     
     csv_header = (
         "VECTOR CHECK AERIAL GROUP INC. - Atmospheric Risk Assessment\n"
