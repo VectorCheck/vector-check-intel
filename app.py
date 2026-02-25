@@ -76,7 +76,6 @@ if not check_password():
 # ---------------------------------------------------------
 @st.cache_data(ttl=86400)
 def get_location_name(user_lat, user_lon):
-    """Reverse geocodes coordinates into a human-readable Region and Province."""
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?lat={user_lat}&lon={user_lon}&format=json"
         req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
@@ -98,7 +97,6 @@ def get_location_name(user_lat, user_lon):
 
 @st.cache_data(ttl=3600)
 def get_nearest_icao_station(user_lat, user_lon):
-    """Spatially queries the AWC JSON API, locks to 50km, and computes cardinal bearing."""
     try:
         min_lat = user_lat - 1.0
         max_lat = user_lat + 1.0
@@ -170,7 +168,6 @@ except Exception:
     st.sidebar.title("Vector Check")
     st.sidebar.caption("Aerial Group Inc.")
 
-# 3. SIDEBAR PARAMETERS 
 st.sidebar.header("Mission Parameters")
 lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f", key="lat_input")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="lon_input")
@@ -229,7 +226,6 @@ st.title("Atmospheric Risk Management")
 st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.session_state.get('active_operator', 'UNKNOWN')}")
 st.divider()
 
-# SILENT FAILURE PROTECTION
 if data is None or "hourly" not in data:
     st.error("⚠️ CRITICAL: Atmospheric Data API Offline or Rejected Request. Please verify coordinates and try again.")
     st.stop()
@@ -298,7 +294,10 @@ def format_dir(d, spd):
 t_temp = h['temperature_2m'][idx]
 rh = h['relative_humidity_2m'][idx]
 w_spd = h['wind_speed_10m'][idx] * k_conv
-wx = h['weather_code'][idx]
+
+# Weather code fallback protection
+wx_list = h.get('weather_code')
+wx = wx_list[idx] if wx_list is not None else 0
 
 if t_temp is not None and rh is not None and rh > 0:
     a = 17.625
@@ -313,15 +312,23 @@ else:
 
 sfc_dir = format_dir(h['wind_direction_10m'][idx], w_spd)
 
+# --- LAPSE RATE FALLBACK ENGINE ---
 frz_raw_list = h.get('freezing_level_height')
-frz_raw = frz_raw_list[idx] if frz_raw_list is not None else None
-frz_disp = "SFC" if t_temp <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
+if frz_raw_list is not None and frz_raw_list[idx] is not None:
+    frz_raw = frz_raw_list[idx]
+    frz_disp = "SFC" if t_temp <= 0 else f"{int(round(frz_raw * 3.28, -2)):,} ft"
+else:
+    if t_temp <= 0:
+        frz_disp = "SFC"
+    else:
+        # Standard Atmosphere Lapse Rate: Temp drops ~1.98C per 1,000 ft
+        est_frz = (t_temp / 1.98) * 1000
+        frz_disp = f"~{int(round(est_frz, -2)):,} ft (Est)"
 
 raw_gst_list = h.get('wind_gusts_10m')
 raw_gst = raw_gst_list[idx] * k_conv if raw_gst_list is not None else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
-# Ultra-safe boundary layer wind extraction. Checks 120m first, then 100m, then defaults to 10m
 u_v_list = h.get('wind_speed_120m', h.get('wind_speed_100m', h.get('wind_speed_10m')))
 u_v = u_v_list[idx] * k_conv if u_v_list is not None else w_spd
 
