@@ -275,6 +275,14 @@ def format_dir(d, spd):
     if spd == 0: return 0
     return r
 
+def calc_td(t, rh):
+    """Calculates dewpoint from temperature and relative humidity."""
+    if rh <= 0: return t
+    a = 17.625
+    b = 243.04
+    alpha = math.log(rh / 100.0) + ((a * t) / (b + t))
+    return (b * alpha) / (a - alpha)
+
 t_temp_raw = h.get('temperature_2m', [0])[idx]
 t_temp = float(t_temp_raw) if t_temp_raw is not None else 0.0
 
@@ -287,32 +295,37 @@ w_spd = (float(w_spd_raw) if w_spd_raw is not None else 0.0) * k_conv
 wx_list = h.get('weather_code', [0])
 wx = int(wx_list[idx]) if (wx_list and len(wx_list) > idx and wx_list[idx] is not None) else 0
 
-if t_temp_raw is not None and rh_raw is not None and rh > 0:
-    a = 17.625
-    b = 243.04
-    alpha = math.log(rh / 100.0) + ((a * t_temp) / (b + t_temp))
-    td = (b * alpha) / (a - alpha)
-    raw_base = max(0, (t_temp - td) * 400)
-    c_base = int(round(raw_base, -2)) 
-else:
-    td = t_temp
-    c_base = 10000
+td = calc_td(t_temp, rh)
+sfc_spread = t_temp - td
 
 sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
 sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
-thermal_profile = [
-    {'h': data.get('elevation', 0) * 3.28084, 't': t_temp}
-]
+# --- THERMAL PROFILE GENERATION ---
+sfc_elevation = data.get('elevation', 0) * 3.28084
+thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread}]
 
 for p in [1000, 925, 850, 700]:
     gh_list = h.get(f'geopotential_height_{p}hPa')
     t_list = h.get(f'temperature_{p}hPa')
-    if gh_list and t_list and len(gh_list) > idx and len(t_list) > idx and gh_list[idx] is not None and t_list[idx] is not None:
-        gh_ft = float(gh_list[idx]) * 3.28084
-        if gh_ft > thermal_profile[-1]['h']:
-            thermal_profile.append({'h': gh_ft, 't': float(t_list[idx])})
+    rh_list = h.get(f'relative_humidity_{p}hPa')
+    
+    if gh_list and t_list and rh_list and len(gh_list) > idx and len(t_list) > idx and len(rh_list) > idx:
+        if gh_list[idx] is not None and t_list[idx] is not None and rh_list[idx] is not None:
+            p_gh = float(gh_list[idx]) * 3.28084
+            p_t = float(t_list[idx])
+            p_rh = int(rh_list[idx])
+            p_td = calc_td(p_t, p_rh)
+            
+            if p_gh > thermal_profile[-1]['h']:
+                thermal_profile.append({
+                    'h': p_gh, 
+                    't': p_t, 
+                    'td': p_td, 
+                    'spread': p_t - p_td
+                })
 
+# --- PRECISE FREEZING LEVEL DETERMINATION ---
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
     frz_raw = float(frz_raw_list[idx])
@@ -325,7 +338,6 @@ else:
         for i in range(1, len(thermal_profile)):
             lower = thermal_profile[i-1]
             upper = thermal_profile[i]
-            
             if upper['t'] <= 0:
                 t_diff = lower['t'] - upper['t']
                 if t_diff > 0:
@@ -334,6 +346,36 @@ else:
                 else:
                     frz_h = lower['h']
                 frz_disp = f"{int(round(frz_h, -2)):,} ft"
+                break
+
+# --- CLOUD BASE ANALYSIS (CONVECTIVE VS STRATIFORM) ---
+t_950_list = h.get('temperature_925hPa')
+t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_950_list[idx] is not None) else t_temp
+is_stable = t_950 > (t_temp - 2.0)
+
+is_convective = (wx >= 80) or (not is_stable)
+
+if is_convective:
+    # Rule of thumb for unstable boundary layer
+    raw_base = max(0, sfc_spread * 400)
+    c_base_disp = f"{int(round(raw_base, -2)):,} ft (CONV)"
+else:
+    # NWP Tephigram analysis for stable layers
+    c_base_disp = ">10,000 ft (CLR)"
+    c_amt = "CLR"
+    
+    # 1. Search for a solid ceiling (OVC/BKN)
+    for layer in thermal_profile:
+        if layer['spread'] <= 3.0: 
+            c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
+            c_base_disp = f"{int(round(layer['h'], -2)):,} ft ({c_amt})"
+            break
+            
+    # 2. If no ceiling, search for scattered layers
+    if c_amt == "CLR":
+        for layer in thermal_profile:
+            if layer['spread'] <= 5.0:
+                c_base_disp = f"{int(round(layer['h'], -2)):,} ft (SCT)"
                 break
 
 raw_gst_list = h.get('wind_gusts_10m')
@@ -359,11 +401,6 @@ else:
         u_h = 10.0
     
 icing_cond = calculate_icing_profile(h, idx, wx)
-
-t_950_list = h.get('temperature_925hPa')
-t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_950_list[idx] is not None) else t_temp
-is_stable = t_950 > (t_temp - 2.0)
-
 dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
 astro = get_astronomical_data(lat, lon, dt_utc_exact, local_tz, tz_abbr)
 space_data = get_kp_index(dt_utc_exact)
@@ -394,7 +431,7 @@ c[3].metric(f"Wind Spd", f"{sfc_spd_disp} {raw_wind_unit}")
 c[4].metric("Weather", weather_str)
 c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm")
 c[6].metric("Freezing LVL", frz_disp)
-c[7].metric("Cloud Base", f"{c_base} ft")
+c[7].metric("Cloud Base", c_base_disp)
 
 st.divider()
 
@@ -601,7 +638,7 @@ csv_header = (
     f"Wind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\n"
     f"Weather: {weather_str}\n"
     f"Visibility (Est): {int((100-rh)/5 * 1.13)} sm\n"
-    f"Cloud Base: {c_base} ft | Freezing Level: {frz_disp}\n\n"
+    f"Cloud Base: {c_base_disp} | Freezing Level: {frz_disp}\n\n"
     "--- ASTRONOMICAL & SPACE WEATHER ---\n"
     f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
     f"Moon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n"
