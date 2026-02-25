@@ -5,80 +5,46 @@ import ssl
 def fetch_mission_data(lat, lon, model_url):
     """
     Fetches raw atmospheric column data.
-    Uses Dual-Fetch for GEM to merge pure HRDPS surface data with pure RDPS upper air data,
-    routing specifically through the /v1/gem endpoint to prevent 400 Bad Request API crashes.
+    Relies on native endpoint routing (e.g., gem_seamless) to inherently blend 
+    the 2.5km HRDPS and 10km RDPS models while preserving derived variables.
     """
     is_gem = "gem" in model_url
     
+    hourly_params = [
+        "temperature_2m", "relative_humidity_2m", "weather_code", 
+        "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m", 
+        "freezing_level_height", "temperature_925hPa"
+    ]
+    
+    # GEM outputs low-level wind at 120m, ECMWF at 100m
+    if is_gem:
+        hourly_params.extend(["wind_speed_120m", "wind_direction_120m"])
+    else:
+        hourly_params.extend(["wind_speed_100m", "wind_direction_100m"])
+
+    # WMO Standard Pressure Levels for the Extended Trajectory
+    pressure_levels = [1000, 925, 850, 700]
+    for p in pressure_levels:
+        hourly_params.extend([
+            f"geopotential_height_{p}hPa",
+            f"wind_speed_{p}hPa",
+            f"wind_direction_{p}hPa"
+        ])
+
+    params_str = ",".join(hourly_params)
+    
+    # Clean URL without the restrictive 'models=' override
+    url = f"{model_url}?latitude={lat}&longitude={lon}&hourly={params_str}&timezone=UTC&wind_speed_unit=knots"
+
     try:
         # Ignore SSL certificate verification to prevent firewall/cloud blockages
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-
-        if is_gem:
-            # ---------------------------------------------------------
-            # FETCH 1: Pure 2.5km HRDPS (Strictly Surface Boundary Layer)
-            # ---------------------------------------------------------
-            hrdps_params = "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m"
-            url_sfc = f"{model_url}?latitude={lat}&longitude={lon}&hourly={hrdps_params}&models=gem_hrdps_continental&timezone=UTC&wind_speed_unit=knots"
-            
-            req_sfc = urllib.request.Request(url_sfc, headers={'User-Agent': 'VectorCheck-App/5.0'})
-            with urllib.request.urlopen(req_sfc, context=ctx, timeout=10) as response:
-                data_master = json.loads(response.read().decode('utf-8'))
-
-            # ---------------------------------------------------------
-            # FETCH 2: Pure 10km RDPS (Upper Trajectory Matrix)
-            # ---------------------------------------------------------
-            # Strictly adhering to WMO Standard pressure levels to ensure data availability
-            rdps_params_list = ["temperature_925hPa"]
-            for p in [1000, 925, 850, 700]:
-                rdps_params_list.extend([
-                    f"geopotential_height_{p}hPa", 
-                    f"wind_speed_{p}hPa", 
-                    f"wind_direction_{p}hPa"
-                ])
-                
-            rdps_params = ",".join(rdps_params_list)
-            url_upr = f"{model_url}?latitude={lat}&longitude={lon}&hourly={rdps_params}&models=gem_regional&timezone=UTC&wind_speed_unit=knots"
-            
-            req_upr = urllib.request.Request(url_upr, headers={'User-Agent': 'VectorCheck-App/5.0'})
-            with urllib.request.urlopen(req_upr, context=ctx, timeout=10) as response:
-                data_upr = json.loads(response.read().decode('utf-8'))
-
-            # ---------------------------------------------------------
-            # MERGE: Stitch the upper air arrays into the master payload
-            # ---------------------------------------------------------
-            if 'hourly' in data_master and 'hourly' in data_upr:
-                for key, val_array in data_upr['hourly'].items():
-                    if key != "time":
-                        data_master['hourly'][key] = val_array
-
-            return data_master
-
-        else:
-            # ---------------------------------------------------------
-            # STANDARD FETCH: ECMWF (Global 9km)
-            # ---------------------------------------------------------
-            ecmwf_params_list = [
-                "temperature_2m", "relative_humidity_2m", "weather_code", 
-                "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m", 
-                "freezing_level_height", "temperature_925hPa"
-            ]
-            for p in [1000, 925, 850, 700]:
-                ecmwf_params_list.extend([
-                    f"geopotential_height_{p}hPa", 
-                    f"wind_speed_{p}hPa", 
-                    f"wind_direction_{p}hPa"
-                ])
-                
-            params_str = ",".join(ecmwf_params_list)
-            url_ecmwf = f"{model_url}?latitude={lat}&longitude={lon}&hourly={params_str}&models=ecmwf_ifs04&timezone=UTC&wind_speed_unit=knots"
-            
-            req_ecmwf = urllib.request.Request(url_ecmwf, headers={'User-Agent': 'VectorCheck-App/5.0'})
-            with urllib.request.urlopen(req_ecmwf, context=ctx, timeout=10) as response:
-                return json.loads(response.read().decode('utf-8'))
-
+        
+        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/6.0'})
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
+            return json.loads(response.read().decode('utf-8'))
     except Exception as e:
         print(f"API Error: {e}")
         return None
