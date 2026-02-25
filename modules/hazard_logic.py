@@ -28,28 +28,28 @@ def calculate_icing_profile(h, idx, wx_code):
     
     # Freezing Rain = Clear Icing (Highest Danger)
     if wx in [66, 67]:
-        return "SEV (CLR)"
+        return "SEV CLR"
     # Freezing Drizzle
     elif wx in [56, 57]:
-        return "SEV (MIXED)"
+        return "SEV MIXED"
     # Freezing Fog
     elif wx == 48:
-        return "MDT (RIME)"
+        return "MDT RIME"
     
     if t <= 0:
         if wx >= 50:
-            return "MDT (MIXED)"
+            return "MDT MIXED"
         elif rh >= 90:
-            return "MDT (RIME)"
+            return "MDT RIME"
         elif rh >= 80:
-            return "LGT (RIME)"
+            return "LGT RIME"
             
     return "NIL"
 
 def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp):
     """
     Evaluates turbulence and icing risk based strictly on WMO criteria,
-    formatting outputs with Aviation standard severity (LGT/MDT/SEV) and type.
+    formatting outputs with Aviation standard severity and specific approved types.
     """
     # Strict typing intercepts 'None' values fed by the API
     w_spd = float(wind_spd) if wind_spd is not None else 0.0
@@ -64,8 +64,6 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
     turb_type = "MECH" # Default to Mechanical boundary friction
     if wx_val in [95, 96, 99]:
         turb_type = "CONV" # Convective
-    elif not is_stable and w_spd < 15 and gust_delta < 10:
-        turb_type = "THERM" # Thermal instability on lighter wind days
 
     # --- TURBULENCE SEVERITY LOGIC ---
     turb_sev = "NIL"
@@ -76,7 +74,8 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
     elif w_spd >= 15 or gust_delta >= 5:
         turb_sev = "LGT"
         
-    turb = f"{turb_sev} ({turb_type})" if turb_sev != "NIL" else "NIL"
+    # Clean string formatting without brackets
+    turb = f"{turb_sev} {turb_type}" if turb_sev != "NIL" else "NIL"
         
     # --- ICING ALOFT LOGIC ---
     ice = icing_cond
@@ -86,11 +85,11 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
         alt_temp = t_val - ((alt / 1000.0) * 1.98)
         if ice == "NIL" and alt_temp <= 0:
             if wx_val in [66, 67]:
-                ice = "SEV (CLR)"
+                ice = "SEV CLR"
             elif wx_val in [56, 57, 48]:
-                ice = "MDT (RIME)"
+                ice = "MDT RIME"
             elif wx_val >= 50:
-                ice = "MDT (MIXED)"
+                ice = "MDT MIXED"
             
     return turb, ice
 
