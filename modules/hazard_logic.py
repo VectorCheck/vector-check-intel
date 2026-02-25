@@ -17,17 +17,20 @@ def get_weather_element(wx_code, wind_spd):
     return wx_map.get(wx_code, "NIL")
 
 def calculate_icing_profile(h, idx, wx_code):
-    """Evaluates base icing condition from surface parameters."""
-    t = h.get('temperature_2m', [0])[idx]
-    rh = h.get('relative_humidity_2m', [0])[idx]
+    """Evaluates base icing condition from surface parameters with safe NoneType fallbacks."""
+    t_raw = h.get('temperature_2m', [0])[idx]
+    rh_raw = h.get('relative_humidity_2m', [0])[idx]
     
-    # Freezing precipitation is immediate severe icing
-    if wx_code in [48, 56, 57, 66, 67]:
+    # Defensive typing
+    t = float(t_raw) if t_raw is not None else 0.0
+    rh = int(rh_raw) if rh_raw is not None else 0
+    wx = int(wx_code) if wx_code is not None else 0
+    
+    if wx in [48, 56, 57, 66, 67]:
         return "SEVERE"
     
-    # Freezing temps with high moisture
-    if t is not None and t <= 0:
-        if rh >= 90 or wx_code >= 50:
+    if t <= 0:
+        if rh >= 90 or wx >= 50:
             return "MODERATE"
         elif rh >= 80:
             return "LIGHT"
@@ -36,30 +39,35 @@ def calculate_icing_profile(h, idx, wx_code):
 
 def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp):
     """
-    Evaluates turbulence and icing risk based strictly on meteorological criteria,
-    without scaling for specific airframe weights.
+    Evaluates turbulence and icing risk based strictly on baseline WMO criteria,
+    utilizing strict internal typing to prevent TypeError crashes from missing API data.
     """
-    # --- TURBULENCE LOGIC ---
     turb = "NIL"
-    gust_delta = max(0, gust - sfc_spd) 
     
-    # WMO/Aviation Baseline Constraints
-    if wind_spd >= 30 or gust_delta >= 15 or wx in [95, 96, 99]:
+    # Strict typing intercepts 'None' values fed by the API
+    w_spd = float(wind_spd) if wind_spd is not None else 0.0
+    s_spd = float(sfc_spd) if sfc_spd is not None else 0.0
+    g_spd = float(gust) if gust is not None else 0.0
+    wx_val = int(wx) if wx is not None else 0
+    t_val = float(t_temp) if t_temp is not None else 0.0
+    
+    gust_delta = max(0, g_spd - s_spd) 
+    
+    # --- TURBULENCE LOGIC ---
+    if w_spd >= 30 or gust_delta >= 15 or wx_val in [95, 96, 99]:
         turb = "SEVERE"
-    elif wind_spd >= 20 or gust_delta >= 10 or not is_stable:
+    elif w_spd >= 20 or gust_delta >= 10 or not is_stable:
         turb = "MODERATE"
-    elif wind_spd >= 15 or gust_delta >= 5:
+    elif w_spd >= 15 or gust_delta >= 5:
         turb = "LIGHT"
         
     # --- ICING LOGIC ---
     ice = icing_cond
     
-    # Adjust for altitude lapse rate (~1.98C per 1000 ft)
-    if alt > 0 and t_temp is not None:
-        alt_temp = t_temp - ((alt / 1000.0) * 1.98)
+    if alt > 0:
+        alt_temp = t_val - ((alt / 1000.0) * 1.98)
         if ice == "NIL" and alt_temp <= 0:
-            # If we hit freezing aloft and there is moisture/precip in the column
-            if wx >= 50 or wx in [45, 48]:
+            if wx_val >= 50 or wx_val in [45, 48]:
                 ice = "MODERATE"
             
     return turb, ice
@@ -69,16 +77,9 @@ def apply_tactical_highlights(text):
     if not text or text == "NIL" or text == "UNAVAILABLE":
         return text
         
-    # Highlight Freezing conditions (FZRA, FZFG, etc.)
     text = re.sub(r'\b(FZ[A-Z]+)\b', r'<span class="fz-warn">\1</span>', text)
-    
-    # Highlight IFR Ceilings (OVC/BKN below 1000ft)
     text = re.sub(r'\b(BKN|OVC)(0[0-0][0-9])\b', r'<span class="ifr-text">\1\2</span>', text)
-    
-    # Highlight MVFR Ceilings (OVC/BKN 1000-3000ft)
     text = re.sub(r'\b(BKN|OVC)(0[1-2][0-9]|030)\b', r'<span class="mvfr-text">\1\2</span>', text)
-    
-    # Highlight low visibility (< 3SM)
     text = re.sub(r'\b([M]?[0-2](?:\s?[1-3]/[2-4])?SM)\b', r'<span class="ifr-text">\1</span>', text)
     
     return text
