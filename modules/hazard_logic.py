@@ -1,140 +1,84 @@
 import re
 
-def get_weather_element(wx_code, wind_spd=0):
-    """Translates WMO weather codes into standard aviation weather types and METAR abbreviations."""
+def get_weather_element(wx_code, wind_spd):
+    """Translates WMO weather codes into human-readable text."""
     wx_map = {
-        0: "NIL", 1: "NIL", 2: "NIL", 3: "NIL",
-        45: "Fog (FG)", 48: "Freezing Fog (FZFG)",
-        51: "Light Drizzle (DZ)", 53: "Moderate Drizzle (DZ)", 55: "Dense Drizzle (DZ)",
-        56: "Light Freezing Drizzle (FZDZ)", 57: "Dense Freezing Drizzle (FZDZ)",
-        61: "Light Rain (RA)", 63: "Moderate Rain (RA)", 65: "Heavy Rain (RA)",
-        66: "Light Freezing Rain (FZRA)", 67: "Heavy Freezing Rain (FZRA)",
-        71: "Light Snow (SN)", 73: "Moderate Snow (SN)", 75: "Heavy Snow (SN)",
-        77: "Snow Grains (SG)",
-        80: "Light Rain Showers (SHRA)", 81: "Moderate Rain Showers (SHRA)", 82: "Violent Rain Showers (SHRA)",
-        85: "Light Snow Showers (SHSN)", 86: "Heavy Snow Showers (SHSN)",
-        95: "Thunderstorm (TS)", 96: "Thunderstorm w/ Hail (TSGR)", 99: "Heavy Thunderstorm w/ Hail (TSGR)"
+        0: "Clear", 1: "Mainly Clear", 2: "Partly Cloudy", 3: "Overcast",
+        45: "Fog", 48: "Freezing Fog",
+        51: "Light Drizzle", 53: "Drizzle", 55: "Heavy Drizzle", 
+        56: "Freezing Drizzle", 57: "Heavy Freezing Drizzle",
+        61: "Light Rain", 63: "Rain", 65: "Heavy Rain", 
+        66: "Light Freezing Rain", 67: "Heavy Freezing Rain",
+        71: "Light Snow", 73: "Snow", 75: "Heavy Snow", 77: "Snow Grains",
+        80: "Light Rain Showers", 81: "Rain Showers", 82: "Heavy Rain Showers",
+        85: "Light Snow Showers", 86: "Heavy Snow Showers",
+        95: "Thunderstorms", 96: "Thunderstorms with Hail", 99: "Severe Thunderstorms"
     }
-    
-    base_wx = wx_map.get(wx_code, "NIL")
-    
-    # Dynamic Blowing Snow (BLSN) calculation based on Vector Check doctrine
-    if wx_code in [71, 73, 75, 85, 86] and wind_spd >= 15:
-        return "Blowing Snow (BLSN)"
-        
-    return base_wx
+    return wx_map.get(wx_code, "NIL")
 
-def calculate_icing_profile(h, idx, wx):
-    """Determines general icing conditions based on RH, Temp, and active precipitation."""
-    rh = h['relative_humidity_2m'][idx]
-    temp = h['temperature_2m'][idx]
+def calculate_icing_profile(h, idx, wx_code):
+    """Evaluates base icing condition from surface parameters."""
+    t = h.get('temperature_2m', [0])[idx]
+    rh = h.get('relative_humidity_2m', [0])[idx]
     
-    # Visible moisture + freezing temps
-    if rh >= 85 and -20 <= temp <= 0: return True
-    # Specific freezing/winter precipitation WMO codes
-    if wx in [48, 56, 57, 66, 67, 71, 73, 75, 77, 85, 86]: return True
-        
-    return False
+    # Freezing precipitation is immediate severe icing
+    if wx_code in [48, 56, 57, 66, 67]:
+        return "SEVERE"
+    
+    # Freezing temps with high moisture
+    if t is not None and t <= 0:
+        if rh >= 90 or wx_code >= 50:
+            return "MODERATE"
+        elif rh >= 80:
+            return "LIGHT"
+            
+    return "NIL"
 
-def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, airframe_class, t_temp):
+def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp):
     """
-    Calculates altitude-specific turbulence and icing using explicit meteorological doctrine.
-    Strictly aligns with TAF/Tac Prog thresholds and segregates boundary layer from upper-level shear.
+    Evaluates turbulence and icing risk based strictly on meteorological criteria,
+    without scaling for specific airframe weights.
     """
-    # 1. BASE VARIABLES
-    shear_total = abs(wind_alt - wind_sfc)
-    shear_rate_1000 = (shear_total / alt) * 1000 if alt > 0 else 0
-    mech_wind = max(wind_alt, gust_alt)
+    # --- TURBULENCE LOGIC ---
+    turb = "NIL"
+    gust_delta = max(0, gust - sfc_spd) 
     
-    # Airframe scaling applies ONLY to Mechanical wind resistance
-    scale = 0.4 if "Micro" in airframe_class else (0.6 if "Small" in airframe_class else 1.0)
-
-    # 2. EVALUATE CONVECTIVE TURBULENCE 
-    conv_lvl = 0
-    if wx in [80, 81, 82, 85, 86, 95, 96, 97, 98, 99]: 
-        conv_lvl = 3 if wx >= 95 else 2 
-
-    threats = []
-    if conv_lvl > 0:
-        threats.append((conv_lvl, "CVCTV"))
-
-    # 3. SEPARATE BOUNDARY LAYER (<=3000) FROM UPPER SHEAR
-    if alt <= 3000:
+    # WMO/Aviation Baseline Constraints
+    if wind_spd >= 30 or gust_delta >= 15 or wx in [95, 96, 99]:
+        turb = "SEVERE"
+    elif wind_spd >= 20 or gust_delta >= 10 or not is_stable:
+        turb = "MODERATE"
+    elif wind_spd >= 15 or gust_delta >= 5:
+        turb = "LIGHT"
         
-        # EVALUATE LLWS
-        is_llws = False
-        # Absolute minimum gate: Prevent micro-layer rate hallucinations
-        if shear_total >= 20: 
-            if (alt <= 5000 and shear_rate_1000 >= 20) or \
-               (alt <= 500 and shear_total >= 25) or \
-               (alt <= 1000 and shear_total >= 40) or \
-               (alt <= 1500 and shear_total >= 50):
-                is_llws = True
-
-        # EVALUATE MECH
-        mech_lvl = 0
-        if mech_wind >= (40 * scale): mech_lvl = 3
-        elif mech_wind >= (25 * scale): mech_lvl = 2
-        elif mech_wind >= (15 * scale): mech_lvl = 1
-
-        # MUTUAL EXCLUSIVITY
-        if is_llws:
-            threats.append((3, "LLWS")) 
-        elif mech_lvl > 0:
-            threats.append((mech_lvl, "MECH"))
-
-    else:
-        # EVALUATE UPPER LEVEL SHEAR (CAT/Frontal) > 3000ft
-        shear_lvl = 0
-        if shear_rate_1000 >= 10: shear_lvl = 3
-        elif shear_rate_1000 >= 6: shear_lvl = 2
-        elif shear_rate_1000 >= 3: shear_lvl = 1
-        
-        if shear_lvl > 0:
-            threats.append((shear_lvl, "SHEAR"))
-
-    # 4. RESOLVE DOMINANT TURBULENCE
-    turb_str = "NIL"
-    if threats:
-        # Sort by highest severity first
-        threats.sort(key=lambda x: x[0], reverse=True)
-        top_sev, top_type = threats[0]
-        
-        sev_str = "SEV" if top_sev == 3 else ("MDT" if top_sev == 2 else "LGT")
-        turb_str = f"{sev_str} {top_type}"
-
-    # 5. ICING PROFILES
-    t_alt = t_temp - (alt / 1000.0) * 2.0
-    ice_sev = "NIL"
-    ice_type = ""
-
-    if icing_cond or wx in [48, 56, 57, 66, 67, 71, 73, 75, 77, 85, 86]:
-        if 0 >= t_alt >= -20:
-            if wx in [56, 57, 66, 67]: 
-                ice_sev = "SEV"
-            elif wx in [73, 75, 86] or (icing_cond and t_alt >= -10):
-                ice_sev = "MDT"
-            else:
-                ice_sev = "LGT"
-
-            if t_alt >= -5:
-                ice_type = "CLR"
-            elif t_alt >= -15:
-                ice_type = "MXD"
-            else:
-                ice_type = "RIME"
-
-    ice_str = f"{ice_sev} {ice_type}" if ice_sev != "NIL" else "NIL"
-
-    return turb_str, ice_str
-
-def apply_tactical_highlights(raw_text):
-    """Injects warning colors into raw METAR/TAF strings for rapid parsing."""
-    if not raw_text or "UNAVAILABLE" in raw_text:
-        return raw_text
+    # --- ICING LOGIC ---
+    ice = icing_cond
     
-    hazards = ["FZRA", "FZDZ", "TSRA", "TS", "GR", "FC", r"\+FC", "LLWS", "SEV", "ICE"]
-    for hazard in hazards:
-        raw_text = re.sub(rf"\b({hazard})\b", r'<span class="ifr-text">\1</span>', raw_text)
+    # Adjust for altitude lapse rate (~1.98C per 1000 ft)
+    if alt > 0 and t_temp is not None:
+        alt_temp = t_temp - ((alt / 1000.0) * 1.98)
+        if ice == "NIL" and alt_temp <= 0:
+            # If we hit freezing aloft and there is moisture/precip in the column
+            if wx >= 50 or wx in [45, 48]:
+                ice = "MODERATE"
+            
+    return turb, ice
+
+def apply_tactical_highlights(text):
+    """Applies HTML highlighting to critical METAR/TAF elements."""
+    if not text or text == "NIL" or text == "UNAVAILABLE":
+        return text
         
-    return raw_text
+    # Highlight Freezing conditions (FZRA, FZFG, etc.)
+    text = re.sub(r'\b(FZ[A-Z]+)\b', r'<span class="fz-warn">\1</span>', text)
+    
+    # Highlight IFR Ceilings (OVC/BKN below 1000ft)
+    text = re.sub(r'\b(BKN|OVC)(0[0-0][0-9])\b', r'<span class="ifr-text">\1\2</span>', text)
+    
+    # Highlight MVFR Ceilings (OVC/BKN 1000-3000ft)
+    text = re.sub(r'\b(BKN|OVC)(0[1-2][0-9]|030)\b', r'<span class="mvfr-text">\1\2</span>', text)
+    
+    # Highlight low visibility (< 3SM)
+    text = re.sub(r'\b([M]?[0-2](?:\s?[1-3]/[2-4])?SM)\b', r'<span class="ifr-text">\1</span>', text)
+    
+    return text
