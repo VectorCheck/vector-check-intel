@@ -240,12 +240,21 @@ if data and "hourly" in data:
     c = st.columns(8)
     c[0].metric("Temp", f"{t_temp}°C")
     c[1].metric("RH", f"{rh}%")
-    c[2].metric("Wind Dir", f"{sfc_dir:03d}°")
-    c[3].metric(f"Wind Spd", f"{int(w_spd)} {raw_wind_unit}")
     
-    # REPLACED "Precip Type" with "Weather" and called the correct function
+    # UI Display override for Calm / VRB logic
+    if int(w_spd) == 0:
+        sfc_dir_disp = "CALM"
+        sfc_spd_disp = "0"
+    elif int(w_spd) <= 3:
+        sfc_dir_disp = "VRB"
+        sfc_spd_disp = "3"
+    else:
+        sfc_dir_disp = f"{sfc_dir:03d}°"
+        sfc_spd_disp = str(int(w_spd))
+        
+    c[2].metric("Wind Dir", sfc_dir_disp)
+    c[3].metric(f"Wind Spd", f"{sfc_spd_disp} {raw_wind_unit}")
     c[4].metric("Weather", get_weather_element(wx, w_spd))
-    
     c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm")
     c[6].metric("Freezing LVL", frz_disp)
     c[7].metric("Cloud Base", f"{c_base} ft")
