@@ -33,7 +33,7 @@ def fetch_mission_data(lat, lon, model_url):
 
     params_str = ",".join(hourly_params)
     
-    # 3. Construct clean URL. Corrected wind_speed_unit syntax to 'kn'
+    # 3. Construct clean URL without forced 'models=' overrides. Using official 'kn' tag.
     url = f"{model_url}?latitude={lat}&longitude={lon}&hourly={params_str}&timezone=UTC&wind_speed_unit=kn"
 
     try:
@@ -41,13 +41,12 @@ def fetch_mission_data(lat, lon, model_url):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/11.1'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/12.0'})
         with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
             return json.loads(response.read().decode('utf-8'))
             
     except urllib.error.HTTPError as e:
         error_msg = e.read().decode('utf-8')
-        # Return the exact server rejection reason to the UI for transparent debugging
         return {"error": True, "message": f"HTTP {e.code}: {error_msg}", "url": url}
     except Exception as e:
         return {"error": True, "message": str(e), "url": url}
