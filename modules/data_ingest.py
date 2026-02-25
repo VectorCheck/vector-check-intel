@@ -33,15 +33,15 @@ def fetch_mission_data(lat, lon, model_url):
 
     params_str = ",".join(hourly_params)
     
-    # 3. Construct clean URL without forced 'models=' overrides
-    url = f"{model_url}?latitude={lat}&longitude={lon}&hourly={params_str}&timezone=UTC&wind_speed_unit=knots"
+    # 3. Construct clean URL. Corrected wind_speed_unit syntax to 'kn'
+    url = f"{model_url}?latitude={lat}&longitude={lon}&hourly={params_str}&timezone=UTC&wind_speed_unit=kn"
 
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/11.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/11.1'})
         with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
             return json.loads(response.read().decode('utf-8'))
             
