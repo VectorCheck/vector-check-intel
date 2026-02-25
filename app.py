@@ -325,13 +325,13 @@ raw_gst_list = h.get('wind_gusts_10m')
 raw_gst = raw_gst_list[idx] * k_conv if raw_gst_list is not None else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
-# Uniform 100m extraction across all models to prevent math crashes
-u_v_list = h.get('wind_speed_100m', h.get('wind_speed_10m'))
+# Ultra-safe boundary layer wind extraction. Falls back to 1000hPa (RDPS upper boundary) if needed
+u_v_list = h.get('wind_speed_100m', h.get('wind_speed_1000hPa', h.get('wind_speed_10m')))
 u_v = u_v_list[idx] * k_conv if u_v_list is not None else w_spd
 
-u_dir_list = h.get('wind_direction_100m', h.get('wind_direction_10m'))
+u_dir_list = h.get('wind_direction_100m', h.get('wind_direction_1000hPa', h.get('wind_direction_10m')))
 u_dir = u_dir_list[idx] if u_dir_list is not None else sfc_dir
-u_h = 100
+u_h = 100 if 'wind_speed_100m' in h else 110
     
 icing_cond = calculate_icing_profile(h, idx, wx)
 
