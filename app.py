@@ -234,13 +234,9 @@ if data and "hourly" in data:
     sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL (Below Horizon)"
     moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL (Below Horizon)"
 
-    # --- UI RENDERING STARTS HERE ---
-    
-    st.subheader("Forecasted Surface Data")
-    c = st.columns(8)
-    c[0].metric("Temp", f"{t_temp}°C")
-    c[1].metric("RH", f"{rh}%")
-    
+    # Variable capture for shared UI and CSV alignment
+    weather_str = get_weather_element(wx, w_spd)
+
     # UI Display override for Calm / VRB logic
     if int(w_spd) == 0:
         sfc_dir_disp = "CALM"
@@ -251,10 +247,16 @@ if data and "hourly" in data:
     else:
         sfc_dir_disp = f"{sfc_dir:03d}°"
         sfc_spd_disp = str(int(w_spd))
-        
+
+    # --- UI RENDERING STARTS HERE ---
+    
+    st.subheader("Forecasted Surface Data")
+    c = st.columns(8)
+    c[0].metric("Temp", f"{t_temp}°C")
+    c[1].metric("RH", f"{rh}%")
     c[2].metric("Wind Dir", sfc_dir_disp)
     c[3].metric(f"Wind Spd", f"{sfc_spd_disp} {raw_wind_unit}")
-    c[4].metric("Weather", get_weather_element(wx, w_spd))
+    c[4].metric("Weather", weather_str)
     c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm")
     c[6].metric("Freezing LVL", frz_disp)
     c[7].metric("Cloud Base", f"{c_base} ft")
@@ -275,11 +277,19 @@ if data and "hourly" in data:
         
         turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class, t_temp)
         
+        # Apply CALM/VRB string formatting to dataframe for parity with UI
+        if int(s_c) == 0:
+            mat_dir, mat_spd = "CALM", "0"
+        elif int(s_c) <= 3:
+            mat_dir, mat_spd = "VRB", "3"
+        else:
+            mat_dir, mat_spd = f"{d_c:03d}°", str(int(s_c))
+
         stack_tactical.append({
             "Alt (AGL)": f"{alt}ft", 
-            "Dir": f"{d_c:03d}°", 
-            f"Spd ({raw_wind_unit})": int(s_c), 
-            f"Gust ({raw_wind_unit})": int(g_c), 
+            "Dir": mat_dir, 
+            f"Spd ({raw_wind_unit})": mat_spd, 
+            f"Gust ({raw_wind_unit})": str(int(g_c)), 
             "Turbulence": turb, 
             "Icing": ice
         })
@@ -312,10 +322,18 @@ if data and "hourly" in data:
         g_e = s_e + gust_delta
         turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, airframe_class, t_temp)
         
+        # Apply CALM/VRB string formatting to dataframe for parity with UI
+        if int(s_e) == 0:
+            mat_dir_ext, mat_spd_ext = "CALM", "0"
+        elif int(s_e) <= 3:
+            mat_dir_ext, mat_spd_ext = "VRB", "3"
+        else:
+            mat_dir_ext, mat_spd_ext = f"{d_e:03d}°", str(int(s_e))
+
         stack_ext.append({
             "Alt (AGL)": f"{alt}ft", 
-            "Dir": f"{d_e:03d}°", 
-            f"Spd ({raw_wind_unit})": int(s_e), 
+            "Dir": mat_dir_ext, 
+            f"Spd ({raw_wind_unit})": mat_spd_ext, 
             "Turbulence": turb, 
             "Icing": ice
         })
@@ -388,18 +406,27 @@ if data and "hourly" in data:
     st.divider()
 
     df_export = pd.concat([df_tactical, df_ext])
+    
+    # AUDITED CSV HEADER: Now includes explicit Forecasted Surface Conditions block
     csv_header = (
         "VECTOR CHECK AERIAL GROUP INC. - Atmospheric Risk Assessment\n"
         f"Target ICAO: {icao} | Coordinates: {lat}, {lon}\n"
         f"Forecast Model: {model_choice} | Valid Time: {selected_time_str}\n"
         f"Airframe Class: {airframe_class}\n"
-        f"Wind Unit Standard: {raw_wind_unit}\n" 
+        f"Wind Unit Standard: {raw_wind_unit}\n\n" 
+        "--- FORECASTED SURFACE CONDITIONS ---\n"
+        f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\n"
+        f"Wind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\n"
+        f"Weather: {weather_str}\n"
+        f"Visibility (Est): {int((100-rh)/5 * 1.13)} sm\n"
+        f"Cloud Base: {c_base} ft | Freezing Level: {frz_disp}\n\n"
+        "--- ASTRONOMICAL & SPACE WEATHER ---\n"
         f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
         f"Moon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n"
         f"Space Weather: Kp Index {space_data['kp']} | GNSS Risk: {space_data['risk']}\n"
         f"Position: Sun {sun_pos_display} | Moon {moon_pos_display}\n\n"
-        f"METAR/SPECI:\n{clean_metar}\n\n"
-        f"TAF:\n{clean_taf}\n\n"
+        f"--- METAR/SPECI ---\n{clean_metar}\n\n"
+        f"--- TAF ---\n{clean_taf}\n\n"
         "--- HAZARD STACK (AGL) ---\n"
     )
     
@@ -430,6 +457,7 @@ if data and "hourly" in data:
     if fig: st.pyplot(fig)
     else: st.warning("Insufficient atmospheric layers available to render vertical profile.")
 
+# 7. LIABILITY & TRACKING ARMOR
 st.divider()
 st.markdown("""
 <div style="text-align: center; color: #8E949E; font-size: 0.85rem; padding: 20px;">
