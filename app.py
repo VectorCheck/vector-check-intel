@@ -33,7 +33,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. AUTHENTICATION GATEWAY WITH TELEMETRY
+# 2. AUTHENTICATION GATEWAY
 def check_password():
     def password_entered():
         user = st.session_state["username"]
@@ -64,7 +64,6 @@ def check_password():
         st.button("Authenticate", on_click=password_entered)
         st.error("⚠️ UNAUTHORIZED: Invalid Operator ID or Passcode.")
         return False
-        
     else:
         return True
 
@@ -104,7 +103,6 @@ def get_nearest_icao_station(user_lat, user_lon):
         max_lon = user_lon + 1.0
         
         url = f"https://aviationweather.gov/api/data/taf?bbox={min_lat},{min_lon},{max_lat},{max_lon}&format=json"
-        
         req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode('utf-8'))
@@ -139,14 +137,11 @@ def get_nearest_icao_station(user_lat, user_lon):
                 y = math.sin(dlon) * math.cos(lat2)
                 x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
                 bearing = (math.degrees(math.atan2(y, x)) + 360) % 360
-                
                 dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-                cardinal_idx = int(round(bearing / 45)) % 8
-                
                 best_station = {
                     "icao": icao_code,
                     "dist": dist,
-                    "dir": dirs[cardinal_idx]
+                    "dir": dirs[int(round(bearing / 45)) % 8]
                 }
         
         if best_station["icao"] != "NONE":
@@ -180,9 +175,7 @@ icao = station_data["icao"]
 stn_dist = station_data["dist"]
 stn_dir = station_data["dir"]
 
-display_icao = icao if icao != "NONE" else "N/A"
-st.sidebar.text_input("Nearest Valid ICAO (Auto-Locked)", value=display_icao, disabled=True)
-
+st.sidebar.text_input("Nearest Valid ICAO (Auto-Locked)", value=(icao if icao != "NONE" else "N/A"), disabled=True)
 if icao == "NONE":
     st.sidebar.markdown("<div style='font-size: 0.85rem; color: #8E949E; margin-bottom: 15px;'>No TAF-issuing station within 50km.</div>", unsafe_allow_html=True)
 
@@ -260,21 +253,13 @@ def update_time(offset):
     except ValueError:
         st.session_state.forecast_slider = valid_times_display[0]
 
-selected_time_str = st.sidebar.select_slider(
-    "Forecast Time:", 
-    options=valid_times_display, 
-    key="forecast_slider"
-)
-
+selected_time_str = st.sidebar.select_slider("Forecast Time:", options=valid_times_display, key="forecast_slider")
 idx = times_display.index(selected_time_str)
 relative_hr = valid_times_display.index(selected_time_str)
 
 nav_col1, nav_col2, nav_col3 = st.sidebar.columns([1, 2, 1])
 nav_col1.button("◄", on_click=update_time, args=(-1,), use_container_width=True)
-nav_col2.markdown(
-    f"<div style='text-align: center; font-size: 1.1rem; font-weight: bold; color: #E58E26; margin-top: 5px;'>+ {relative_hr} HR</div>", 
-    unsafe_allow_html=True
-)
+nav_col2.markdown(f"<div style='text-align: center; font-size: 1.1rem; font-weight: bold; color: #E58E26; margin-top: 5px;'>+ {relative_hr} HR</div>", unsafe_allow_html=True)
 nav_col3.button("►", on_click=update_time, args=(1,), use_container_width=True)
 
 st.sidebar.divider()
@@ -289,13 +274,22 @@ def format_dir(d, spd):
     if spd == 0: return 0
     return r
 
-t_temp = h['temperature_2m'][idx]
-rh = h['relative_humidity_2m'][idx]
-w_spd = h['wind_speed_10m'][idx] * k_conv
-wx_list = h.get('weather_code')
-wx = wx_list[idx] if wx_list is not None else 0
+# --- STRICT DEFENSIVE TYPING FOR API EXTRACTIONS ---
+# Prevents Python NoneType math crashes if the API fails to forecast a variable at the timeline edge.
 
-if t_temp is not None and rh is not None and rh > 0:
+t_temp_raw = h.get('temperature_2m', [0])[idx]
+t_temp = float(t_temp_raw) if t_temp_raw is not None else 0.0
+
+rh_raw = h.get('relative_humidity_2m', [0])[idx]
+rh = int(rh_raw) if rh_raw is not None else 0
+
+w_spd_raw = h.get('wind_speed_10m', [0])[idx]
+w_spd = (float(w_spd_raw) if w_spd_raw is not None else 0.0) * k_conv
+
+wx_list = h.get('weather_code', [0])
+wx = int(wx_list[idx]) if (wx_list and len(wx_list) > idx and wx_list[idx] is not None) else 0
+
+if t_temp_raw is not None and rh_raw is not None and rh > 0:
     a = 17.625
     b = 243.04
     alpha = math.log(rh / 100.0) + ((a * t_temp) / (b + t_temp))
@@ -306,11 +300,12 @@ else:
     td = t_temp
     c_base = 10000
 
-sfc_dir = format_dir(h['wind_direction_10m'][idx], w_spd)
+sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
+sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
 frz_raw_list = h.get('freezing_level_height')
-if frz_raw_list is not None and frz_raw_list[idx] is not None:
-    frz_raw = frz_raw_list[idx]
+if frz_raw_list is not None and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
+    frz_raw = float(frz_raw_list[idx])
     frz_disp = "SFC" if t_temp <= 0 else f"{int(round(frz_raw * 3.28, -2)):,} ft"
 else:
     if t_temp <= 0:
@@ -320,31 +315,32 @@ else:
         frz_disp = f"~{int(round(est_frz, -2)):,} ft (Est)"
 
 raw_gst_list = h.get('wind_gusts_10m')
-raw_gst = raw_gst_list[idx] * k_conv if raw_gst_list is not None else w_spd
+raw_gst = (float(raw_gst_list[idx]) * k_conv) if (raw_gst_list and len(raw_gst_list) > idx and raw_gst_list[idx] is not None) else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
+# Safe upper boundary extraction
 u_v_list = h.get('wind_speed_1000hPa')
-if u_v_list and u_v_list[idx] is not None:
-    u_v = u_v_list[idx] * k_conv
-    u_dir = h['wind_direction_1000hPa'][idx]
+if u_v_list and len(u_v_list) > idx and u_v_list[idx] is not None:
+    u_v = float(u_v_list[idx]) * k_conv
+    u_dir = int(h.get('wind_direction_1000hPa', [0])[idx])
     u_h_list = h.get('geopotential_height_1000hPa')
-    u_h = u_h_list[idx] if (u_h_list and u_h_list[idx] is not None) else 110
+    u_h = float(u_h_list[idx]) if (u_h_list and len(u_h_list) > idx and u_h_list[idx] is not None) else 110.0
 else:
     u_v_list = h.get('wind_speed_925hPa')
-    if u_v_list and u_v_list[idx] is not None:
-        u_v = u_v_list[idx] * k_conv
-        u_dir = h['wind_direction_925hPa'][idx]
+    if u_v_list and len(u_v_list) > idx and u_v_list[idx] is not None:
+        u_v = float(u_v_list[idx]) * k_conv
+        u_dir = int(h.get('wind_direction_925hPa', [0])[idx])
         u_h_list = h.get('geopotential_height_925hPa')
-        u_h = u_h_list[idx] if (u_h_list and u_h_list[idx] is not None) else 760
+        u_h = float(u_h_list[idx]) if (u_h_list and len(u_h_list) > idx and u_h_list[idx] is not None) else 760.0
     else:
         u_v = w_spd
         u_dir = sfc_dir
-        u_h = 10
+        u_h = 10.0
     
 icing_cond = calculate_icing_profile(h, idx, wx)
 
 t_950_list = h.get('temperature_925hPa')
-t_950 = t_950_list[idx] if t_950_list is not None else t_temp
+t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_950_list[idx] is not None) else t_temp
 is_stable = t_950 > (t_temp - 2.0)
 
 dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
@@ -390,7 +386,7 @@ for alt in [400, 300, 200, 100]:
     s_c = w_spd + (u_v - w_spd) * (math.log(max(1, alt*0.3048)/10) / math.log(max(1.1, u_h/10)))
     g_c = s_c + gust_delta
     
-    d_c_raw = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / u_h)) % 360
+    d_c_raw = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / max(0.1, u_h))) % 360
     d_c = format_dir(d_c_raw, s_c)
     
     turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, t_temp)
@@ -417,12 +413,26 @@ st.table(df_tactical)
 st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
 p_levels_traj = [1000, 925, 850, 700]
 
-p_profile = sorted([{'h': h.get(f'geopotential_height_{p}hPa')[idx]*3.28, 
-                     's': h.get(f'wind_speed_{p}hPa')[idx] * k_conv, 
-                     'd': h.get(f'wind_direction_{p}hPa')[idx]} 
-                    for p in p_levels_traj if f'wind_speed_{p}hPa' in h and h[f'wind_speed_{p}hPa'][idx] is not None], 
-                   key=lambda x: x['h'])
-                   
+p_profile = []
+for p in p_levels_traj:
+    ws_list = h.get(f'wind_speed_{p}hPa')
+    wd_list = h.get(f'wind_direction_{p}hPa')
+    gh_list = h.get(f'geopotential_height_{p}hPa')
+    
+    if ws_list and wd_list and gh_list and len(ws_list) > idx:
+        ws = ws_list[idx]
+        wd = wd_list[idx]
+        gh = gh_list[idx]
+        
+        # Strict NoneType avoidance for upper air payload
+        if ws is not None and wd is not None and gh is not None:
+            p_profile.append({
+                'h': float(gh) * 3.28,
+                's': float(ws) * k_conv,
+                'd': int(wd)
+            })
+
+p_profile = sorted(p_profile, key=lambda x: x['h'])
 stack_ext = []
 
 if not p_profile:
@@ -556,7 +566,6 @@ else:
 st.divider()
 
 df_export = pd.concat([df_tactical, df_ext])
-
 stn_display_str = f"{icao} | {stn_dist:.1f} km {stn_dir} of AO" if icao != "NONE" else "No METAR/TAF information within a 50km radius."
 
 csv_header = (
