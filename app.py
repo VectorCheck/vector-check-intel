@@ -72,8 +72,31 @@ if not check_password():
     st.stop()
 
 # ---------------------------------------------------------
-# SPATIAL ENGINE: AUTO-LOCATE NEAREST TAF STATION & BEARING
+# SPATIAL ENGINES
 # ---------------------------------------------------------
+@st.cache_data(ttl=86400)
+def get_location_name(user_lat, user_lon):
+    """Reverse geocodes coordinates into a human-readable Region and Province."""
+    try:
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={user_lat}&lon={user_lon}&format=json"
+        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            
+        address = data.get('address', {})
+        # Hierarchical fallback for region naming
+        region = address.get('city', address.get('town', address.get('county', address.get('village', address.get('region', 'Unknown Region')))))
+        province = address.get('state', address.get('country', 'Unknown'))
+        
+        if region != 'Unknown Region' and province != 'Unknown':
+            return f"{region}, {province}"
+        elif province != 'Unknown':
+            return province
+        else:
+            return "Unknown Location"
+    except Exception:
+        return "Location Data Unavailable"
+
 @st.cache_data(ttl=3600)
 def get_nearest_icao_station(user_lat, user_lon):
     """Spatially queries the AWC JSON API, locks to 50km, and computes cardinal bearing."""
@@ -155,6 +178,10 @@ except Exception:
 st.sidebar.header("Mission Parameters")
 lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f", key="lat_input")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="lon_input")
+
+# Dynamic Regional Subheader
+regional_name = get_location_name(lat, lon)
+st.sidebar.markdown(f"<div style='color: #E58E26; font-weight: bold; font-size: 1.05rem; margin-top: -10px; margin-bottom: 20px;'>📍 {regional_name}</div>", unsafe_allow_html=True)
 
 # Automated Spatial Query Execution
 station_data = get_nearest_icao_station(lat, lon)
@@ -474,15 +501,12 @@ if data and "hourly" in data:
         
         # --- TAF FORMATTING ENGINE ---
         raw_taf_no_html = re.sub('<[^<]+>', '', taf_raw)
-        
-        # Strictly purge any empty ghost lines before applying index logic
         taf_lines = [line.strip() for line in raw_taf_no_html.split('\n') if line.strip()]
         
         ui_taf_lines = []
         csv_taf_lines = []
         
         for i, line in enumerate(taf_lines):
-            # Keep Line 0, the very last real text line, and FM lines perfectly flush
             if i == 0 or i == len(taf_lines) - 1 or line.startswith("FM"):
                 ui_taf_lines.append(line)
                 csv_taf_lines.append(line)
@@ -498,6 +522,7 @@ if data and "hourly" in data:
         taf_disp = taf_disp.replace('\n', '<br>')
         
         st.subheader(f"Station Actuals: {icao} | {stn_dist:.1f} km {stn_dir} of AO")
+        # Removed font-family: monospace; to ensure styling parity
         st.markdown(f'''
         <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
             <div class="obs-text">
@@ -506,7 +531,7 @@ if data and "hourly" in data:
                     {metar_disp}
                 </div>
                 <strong style="color: #8E949E;">TAF</strong><br>
-                <div style="line-height: 1.3; font-size: 0.95rem; margin-top: 5px; font-family: monospace;">
+                <div style="line-height: 1.3; font-size: 0.95rem; margin-top: 5px;">
                     {taf_disp}
                 </div>
             </div>
@@ -522,6 +547,7 @@ if data and "hourly" in data:
     csv_header = (
         "VECTOR CHECK AERIAL GROUP INC. - Atmospheric Risk Assessment\n"
         f"Target Coordinates: {lat}, {lon}\n"
+        f"Regional Area: {regional_name}\n"
         f"Automated Weather Station: {stn_display_str}\n"
         f"Forecast Model: {model_choice} | Valid Time: {selected_time_str}\n"
         f"Airframe Class: {airframe_class}\n"
