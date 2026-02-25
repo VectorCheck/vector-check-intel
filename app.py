@@ -179,9 +179,9 @@ st.sidebar.header("Mission Parameters")
 lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f", key="lat_input")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="lon_input")
 
-# Dynamic Regional Subheader
+# Dynamic Regional Subheader - Made subtle and removed emoji
 regional_name = get_location_name(lat, lon)
-st.sidebar.markdown(f"<div style='color: #E58E26; font-weight: bold; font-size: 1.05rem; margin-top: -10px; margin-bottom: 20px;'>📍 {regional_name}</div>", unsafe_allow_html=True)
+st.sidebar.markdown(f"<div style='color: #8E949E; font-size: 0.9rem; margin-top: -10px; margin-bottom: 20px;'>{regional_name}</div>", unsafe_allow_html=True)
 
 # Automated Spatial Query Execution
 station_data = get_nearest_icao_station(lat, lon)
@@ -522,7 +522,6 @@ if data and "hourly" in data:
         taf_disp = taf_disp.replace('\n', '<br>')
         
         st.subheader(f"Station Actuals: {icao} | {stn_dist:.1f} km {stn_dir} of AO")
-        # Removed font-family: monospace; to ensure styling parity
         st.markdown(f'''
         <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
             <div class="obs-text">
