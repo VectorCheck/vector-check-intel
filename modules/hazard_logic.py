@@ -17,33 +17,40 @@ def get_weather_element(wx_code, wind_spd):
     return wx_map.get(wx_code, "NIL")
 
 def calculate_icing_profile(h, idx, wx_code):
-    """Evaluates base icing condition from surface parameters with safe NoneType fallbacks."""
+    """Evaluates base icing condition and type from surface parameters."""
     t_raw = h.get('temperature_2m', [0])[idx]
     rh_raw = h.get('relative_humidity_2m', [0])[idx]
     
-    # Defensive typing
+    # Defensive typing to prevent API edge-case crashes
     t = float(t_raw) if t_raw is not None else 0.0
     rh = int(rh_raw) if rh_raw is not None else 0
     wx = int(wx_code) if wx_code is not None else 0
     
-    if wx in [48, 56, 57, 66, 67]:
-        return "SEVERE"
+    # Freezing Rain = Clear Icing (Highest Danger)
+    if wx in [66, 67]:
+        return "SEV (CLR)"
+    # Freezing Drizzle
+    elif wx in [56, 57]:
+        return "SEV (MIXED)"
+    # Freezing Fog
+    elif wx == 48:
+        return "MDT (RIME)"
     
     if t <= 0:
-        if rh >= 90 or wx >= 50:
-            return "MODERATE"
+        if wx >= 50:
+            return "MDT (MIXED)"
+        elif rh >= 90:
+            return "MDT (RIME)"
         elif rh >= 80:
-            return "LIGHT"
+            return "LGT (RIME)"
             
     return "NIL"
 
 def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp):
     """
-    Evaluates turbulence and icing risk based strictly on baseline WMO criteria,
-    utilizing strict internal typing to prevent TypeError crashes from missing API data.
+    Evaluates turbulence and icing risk based strictly on WMO criteria,
+    formatting outputs with Aviation standard severity (LGT/MDT/SEV) and type.
     """
-    turb = "NIL"
-    
     # Strict typing intercepts 'None' values fed by the API
     w_spd = float(wind_spd) if wind_spd is not None else 0.0
     s_spd = float(sfc_spd) if sfc_spd is not None else 0.0
@@ -53,22 +60,37 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
     
     gust_delta = max(0, g_spd - s_spd) 
     
-    # --- TURBULENCE LOGIC ---
+    # --- TURBULENCE TYPE LOGIC ---
+    turb_type = "MECH" # Default to Mechanical boundary friction
+    if wx_val in [95, 96, 99]:
+        turb_type = "CONV" # Convective
+    elif not is_stable and w_spd < 15 and gust_delta < 10:
+        turb_type = "THERM" # Thermal instability on lighter wind days
+
+    # --- TURBULENCE SEVERITY LOGIC ---
+    turb_sev = "NIL"
     if w_spd >= 30 or gust_delta >= 15 or wx_val in [95, 96, 99]:
-        turb = "SEVERE"
+        turb_sev = "SEV"
     elif w_spd >= 20 or gust_delta >= 10 or not is_stable:
-        turb = "MODERATE"
+        turb_sev = "MDT"
     elif w_spd >= 15 or gust_delta >= 5:
-        turb = "LIGHT"
+        turb_sev = "LGT"
         
-    # --- ICING LOGIC ---
+    turb = f"{turb_sev} ({turb_type})" if turb_sev != "NIL" else "NIL"
+        
+    # --- ICING ALOFT LOGIC ---
     ice = icing_cond
     
+    # Check if we cross the freezing level during our climb to Target Altitude
     if alt > 0:
         alt_temp = t_val - ((alt / 1000.0) * 1.98)
         if ice == "NIL" and alt_temp <= 0:
-            if wx_val >= 50 or wx_val in [45, 48]:
-                ice = "MODERATE"
+            if wx_val in [66, 67]:
+                ice = "SEV (CLR)"
+            elif wx_val in [56, 57, 48]:
+                ice = "MDT (RIME)"
+            elif wx_val >= 50:
+                ice = "MDT (MIXED)"
             
     return turb, ice
 
@@ -77,9 +99,16 @@ def apply_tactical_highlights(text):
     if not text or text == "NIL" or text == "UNAVAILABLE":
         return text
         
+    # Highlight Freezing conditions (FZRA, FZFG, etc.)
     text = re.sub(r'\b(FZ[A-Z]+)\b', r'<span class="fz-warn">\1</span>', text)
+    
+    # Highlight IFR Ceilings (OVC/BKN below 1000ft)
     text = re.sub(r'\b(BKN|OVC)(0[0-0][0-9])\b', r'<span class="ifr-text">\1\2</span>', text)
+    
+    # Highlight MVFR Ceilings (OVC/BKN 1000-3000ft)
     text = re.sub(r'\b(BKN|OVC)(0[1-2][0-9]|030)\b', r'<span class="mvfr-text">\1\2</span>', text)
+    
+    # Highlight low visibility (< 3SM)
     text = re.sub(r'\b([M]?[0-2](?:\s?[1-3]/[2-4])?SM)\b', r'<span class="ifr-text">\1</span>', text)
     
     return text
