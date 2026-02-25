@@ -8,7 +8,7 @@ import pytz
 
 # Import Vector Check Modules
 from modules.data_ingest import get_aviation_weather, fetch_mission_data
-from modules.hazard_logic import get_precip_type, calculate_icing_profile, get_turb_ice, apply_tactical_highlights
+from modules.hazard_logic import get_weather_element, calculate_icing_profile, get_turb_ice, apply_tactical_highlights
 from modules.visualizations import plot_convective_profile
 from modules.telemetry import log_action
 from modules.astronomy import get_astronomical_data
@@ -183,7 +183,6 @@ if data and "hourly" in data:
     k_conv = 0.539957 if is_kmh else 1.0
     raw_wind_unit = "KT"
     
-    # Helper for rounding directions to nearest 10
     def format_dir(d, spd):
         r = int(round(float(d), -1)) % 360
         if r == 0 and spd > 0: return 360
@@ -243,7 +242,10 @@ if data and "hourly" in data:
     c[1].metric("RH", f"{rh}%")
     c[2].metric("Wind Dir", f"{sfc_dir:03d}°")
     c[3].metric(f"Wind Spd", f"{int(w_spd)} {raw_wind_unit}")
-    c[4].metric("Precip Type", get_precip_type(wx))
+    
+    # REPLACED "Precip Type" with "Weather" and called the correct function
+    c[4].metric("Weather", get_weather_element(wx, w_spd))
+    
     c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm")
     c[6].metric("Freezing LVL", frz_disp)
     c[7].metric("Cloud Base", f"{c_base} ft")
