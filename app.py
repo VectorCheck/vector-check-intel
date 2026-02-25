@@ -84,7 +84,6 @@ def get_location_name(user_lat, user_lon):
             data = json.loads(response.read().decode('utf-8'))
             
         address = data.get('address', {})
-        # Hierarchical fallback for region naming
         region = address.get('city', address.get('town', address.get('county', address.get('village', address.get('region', 'Unknown Region')))))
         province = address.get('state', address.get('country', 'Unknown'))
         
@@ -127,7 +126,6 @@ def get_nearest_icao_station(user_lat, user_lon):
             stn_lat = float(taf['lat'])
             stn_lon = float(taf['lon'])
             
-            # Spherical Haversine calculation for exact kilometers
             R = 6371.0 
             lat1, lon1 = math.radians(user_lat), math.radians(user_lon)
             lat2, lon2 = math.radians(stn_lat), math.radians(stn_lon)
@@ -140,12 +138,10 @@ def get_nearest_icao_station(user_lat, user_lon):
             dist = R * c
             
             if dist <= 50.0 and dist < best_station["dist"]:
-                # Calculate True Bearing
                 y = math.sin(dlon) * math.cos(lat2)
                 x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
                 bearing = (math.degrees(math.atan2(y, x)) + 360) % 360
                 
-                # Map to 8-Point Cardinal Compass
                 dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
                 cardinal_idx = int(round(bearing / 45)) % 8
                 
@@ -179,24 +175,20 @@ st.sidebar.header("Mission Parameters")
 lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f", key="lat_input")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="lon_input")
 
-# Dynamic Regional Subheader - Made subtle and removed emoji
 regional_name = get_location_name(lat, lon)
 st.sidebar.markdown(f"<div style='color: #8E949E; font-size: 0.9rem; margin-top: -10px; margin-bottom: 20px;'>{regional_name}</div>", unsafe_allow_html=True)
 
-# Automated Spatial Query Execution
 station_data = get_nearest_icao_station(lat, lon)
 icao = station_data["icao"]
 stn_dist = station_data["dist"]
 stn_dir = station_data["dir"]
 
-# Locked UI Element
 display_icao = icao if icao != "NONE" else "N/A"
 st.sidebar.text_input("Nearest Valid ICAO (Auto-Locked)", value=display_icao, disabled=True)
 
 if icao == "NONE":
     st.sidebar.markdown("<div style='font-size: 0.85rem; color: #8E949E; margin-bottom: 15px;'>No TAF-issuing station within 50km.</div>", unsafe_allow_html=True)
 
-# Transport Canada Airframe Classification
 airframe_class = st.sidebar.selectbox(
     "Airframe Class (Transport Canada):", 
     options=[
@@ -228,7 +220,6 @@ model_api_map = {
 
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 
-# Controlled Fetch
 if icao != "NONE":
     metar_raw, taf_raw = get_aviation_weather(icao)
 else:
@@ -238,7 +229,6 @@ st.title("Atmospheric Risk Management")
 st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.session_state.get('active_operator', 'UNKNOWN')}")
 st.divider()
 
-# Resolve Target Timezone
 tf = TimezoneFinder()
 tz_str = tf.timezone_at(lng=lon, lat=lat)
 local_tz = pytz.timezone(tz_str) if tz_str else timezone.utc
@@ -247,7 +237,6 @@ tz_abbr = datetime.now(local_tz).tzname() if tz_str else "UTC"
 if data and "hourly" in data:
     h = data["hourly"]
     
-    # Generate Dual-Time Display
     times_display = []
     for t in h["time"]:
         dt_u = datetime.fromisoformat(t).replace(tzinfo=timezone.utc)
@@ -282,7 +271,6 @@ if data and "hourly" in data:
     idx = times_display.index(selected_time_str)
     relative_hr = valid_times_display.index(selected_time_str)
 
-    # Dynamic Forecast Navigator
     nav_col1, nav_col2, nav_col3 = st.sidebar.columns([1, 2, 1])
     nav_col1.button("◄", on_click=update_time, args=(-1,), use_container_width=True)
     nav_col2.markdown(
@@ -293,7 +281,6 @@ if data and "hourly" in data:
 
     st.sidebar.divider()
     
-    # --- HARD CONVERSION TO KNOTS ---
     is_kmh = "km/h" in data.get("hourly_units", {}).get("wind_speed_10m", "km/h").lower()
     k_conv = 0.539957 if is_kmh else 1.0
     raw_wind_unit = "KT"
@@ -304,7 +291,6 @@ if data and "hourly" in data:
         if spd == 0: return 0
         return r
 
-    # Extract Surface Data
     t_temp = h['temperature_2m'][idx]
     rh = h['relative_humidity_2m'][idx]
     w_spd = h['wind_speed_10m'][idx] * k_conv
@@ -323,10 +309,12 @@ if data and "hourly" in data:
 
     sfc_dir = format_dir(h['wind_direction_10m'][idx], w_spd)
 
-    frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
+    frz_raw_list = h.get('freezing_level_height')
+    frz_raw = frz_raw_list[idx] if frz_raw_list is not None else None
     frz_disp = "SFC" if t_temp <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
 
-    raw_gst = h.get('wind_gusts_10m', [w_spd / k_conv])[idx] * k_conv
+    raw_gst_list = h.get('wind_gusts_10m')
+    raw_gst = raw_gst_list[idx] * k_conv if raw_gst_list is not None else w_spd
     gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
     
     if "gem" in model_api_map[model_choice]:
@@ -339,8 +327,10 @@ if data and "hourly" in data:
         u_h = 100
         
     icing_cond = calculate_icing_profile(h, idx, wx)
-    t_950 = h.get('temperature_950hPa', [t_temp])[idx]
-    is_stable = t_950 is not None and t_950 > (t_temp - 2.0)
+    
+    t_950_list = h.get('temperature_950hPa')
+    t_950 = t_950_list[idx] if t_950_list is not None else t_temp
+    is_stable = t_950 > (t_temp - 2.0)
 
     dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
     astro = get_astronomical_data(lat, lon, dt_utc_exact, local_tz, tz_abbr)
@@ -411,13 +401,15 @@ if data and "hourly" in data:
 
     st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
     p_levels_traj = [1000, 950, 925, 900, 850, 800, 700, 600]
+    
     p_profile = sorted([{'h': h.get(f'geopotential_height_{p}hPa')[idx]*3.28, 
                          's': h.get(f'wind_speed_{p}hPa')[idx] * k_conv, 
                          'd': h.get(f'wind_direction_{p}hPa')[idx]} 
-                        for p in p_levels_traj if h.get(f'wind_speed_{p}hPa')[idx] is not None], 
+                        for p in p_levels_traj if f'wind_speed_{p}hPa' in h and h[f'wind_speed_{p}hPa'][idx] is not None], 
                        key=lambda x: x['h'])
                        
     stack_ext = []
+    
     for alt in [5000, 4000, 3000, 2000, 1000]:
         pts = [{'h': u_h*3.28, 's': u_v, 'd': u_dir}] + p_profile
         blw, abv = pts[0], pts[-1]
@@ -499,7 +491,6 @@ if data and "hourly" in data:
     else:
         clean_metar = re.sub('<[^<]+>', '', metar_raw)
         
-        # --- TAF FORMATTING ENGINE ---
         raw_taf_no_html = re.sub('<[^<]+>', '', taf_raw)
         taf_lines = [line.strip() for line in raw_taf_no_html.split('\n') if line.strip()]
         
