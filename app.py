@@ -321,7 +321,7 @@ raw_gst_list = h.get('wind_gusts_10m')
 raw_gst = raw_gst_list[idx] * k_conv if raw_gst_list is not None else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
-# Uniform, crash-proof 100m interpolation across all models
+# Safely extract upper wind, defaulting to 10m if upper air arrays are empty
 u_v_list = h.get('wind_speed_100m', h.get('wind_speed_10m'))
 u_v = u_v_list[idx] * k_conv if u_v_list is not None else w_spd
 
@@ -331,7 +331,8 @@ u_h = 100
     
 icing_cond = calculate_icing_profile(h, idx, wx)
 
-t_950_list = h.get('temperature_950hPa')
+# Re-aligned to the guaranteed 925hPa WMO standard level
+t_950_list = h.get('temperature_925hPa')
 t_950 = t_950_list[idx] if t_950_list is not None else t_temp
 is_stable = t_950 > (t_temp - 2.0)
 
@@ -403,7 +404,7 @@ df_tactical = pd.DataFrame(stack_tactical).set_index("Alt (AGL)")
 st.table(df_tactical)
 
 st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
-p_levels_traj = [1000, 950, 925, 900, 850, 800, 700, 600]
+p_levels_traj = [1000, 925, 850, 700]
 
 p_profile = sorted([{'h': h.get(f'geopotential_height_{p}hPa')[idx]*3.28, 
                      's': h.get(f'wind_speed_{p}hPa')[idx] * k_conv, 
@@ -413,36 +414,47 @@ p_profile = sorted([{'h': h.get(f'geopotential_height_{p}hPa')[idx]*3.28,
                    
 stack_ext = []
 
-for alt in [5000, 4000, 3000, 2000, 1000]:
-    pts = [{'h': u_h*3.28, 's': u_v, 'd': u_dir}] + p_profile
-    blw, abv = pts[0], pts[-1]
-    for i in range(len(pts)-1):
-        if pts[i]['h'] <= alt <= pts[i+1]['h']:
-            blw, abv = pts[i], pts[i+1]; break
-    
-    frac = (alt - blw['h']) / (abv['h'] - blw['h']) if abv['h'] != blw['h'] else 0
-    s_e = blw['s'] + frac * (abv['s'] - blw['s'])
-    
-    d_e_raw = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
-    d_e = format_dir(d_e_raw, s_e)
-    
-    g_e = s_e + gust_delta
-    turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, airframe_class, t_temp)
-    
-    if int(s_e) == 0:
-        mat_dir_ext, mat_spd_ext = "CALM", "0"
-    elif int(s_e) <= 3:
-        mat_dir_ext, mat_spd_ext = "VRB", "3"
-    else:
-        mat_dir_ext, mat_spd_ext = f"{d_e:03d}°", str(int(s_e))
+if not p_profile:
+    # Fail-safe if upper air arrays are completely empty
+    for alt in [5000, 4000, 3000, 2000, 1000]:
+        stack_ext.append({
+            "Alt (AGL)": f"{alt}ft", 
+            "Dir": "N/A", 
+            f"Spd ({raw_wind_unit})": "N/A", 
+            "Turbulence": "N/A", 
+            "Icing": "N/A"
+        })
+else:
+    for alt in [5000, 4000, 3000, 2000, 1000]:
+        pts = [{'h': u_h*3.28, 's': u_v, 'd': u_dir}] + p_profile
+        blw, abv = pts[0], pts[-1]
+        for i in range(len(pts)-1):
+            if pts[i]['h'] <= alt <= pts[i+1]['h']:
+                blw, abv = pts[i], pts[i+1]; break
+        
+        frac = (alt - blw['h']) / (abv['h'] - blw['h']) if abv['h'] != blw['h'] else 0
+        s_e = blw['s'] + frac * (abv['s'] - blw['s'])
+        
+        d_e_raw = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
+        d_e = format_dir(d_e_raw, s_e)
+        
+        g_e = s_e + gust_delta
+        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, airframe_class, t_temp)
+        
+        if int(s_e) == 0:
+            mat_dir_ext, mat_spd_ext = "CALM", "0"
+        elif int(s_e) <= 3:
+            mat_dir_ext, mat_spd_ext = "VRB", "3"
+        else:
+            mat_dir_ext, mat_spd_ext = f"{d_e:03d}°", str(int(s_e))
 
-    stack_ext.append({
-        "Alt (AGL)": f"{alt}ft", 
-        "Dir": mat_dir_ext, 
-        f"Spd ({raw_wind_unit})": mat_spd_ext, 
-        "Turbulence": turb, 
-        "Icing": ice
-    })
+        stack_ext.append({
+            "Alt (AGL)": f"{alt}ft", 
+            "Dir": mat_dir_ext, 
+            f"Spd ({raw_wind_unit})": mat_spd_ext, 
+            "Turbulence": turb, 
+            "Icing": ice
+        })
 
 df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
 st.table(df_ext)
