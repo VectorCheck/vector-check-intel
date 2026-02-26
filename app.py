@@ -301,7 +301,7 @@ sfc_spread = t_temp - td
 sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
 sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
-# --- NATIVE VISIBILITY EXTRACTION & CAPPING ---
+# --- NATIVE VISIBILITY EXTRACTION & CAPPING (No Brackets/Tags) ---
 vis_raw_list = h.get('visibility')
 if vis_raw_list and len(vis_raw_list) > idx and vis_raw_list[idx] is not None:
     vis_m = float(vis_raw_list[idx])
@@ -311,15 +311,15 @@ if vis_raw_list and len(vis_raw_list) > idx and vis_raw_list[idx] is not None:
     else:
         vis_disp = f"{vis_sm:.1f} SM"
 else:
-    # Fallback to RH estimator if API fails to provide visibility array
+    # Fallback to RH estimator if API payload drops visibility (Clean format)
     if t_temp_raw is not None and rh_raw is not None and rh > 0:
         vis_est = int((100-rh)/5 * 1.13)
         if vis_est > 7:
-            vis_disp = "> 7 SM (Est)"
+            vis_disp = "> 7 SM"
         else:
-            vis_disp = f"{vis_est} SM (Est)"
+            vis_disp = f"{vis_est} SM"
     else:
-        vis_disp = "N/A"
+        vis_disp = "NIL"
 
 # --- THERMAL PROFILE GENERATION ---
 sfc_elevation = data.get('elevation', 0) * 3.28084
@@ -345,7 +345,7 @@ for p in [1000, 925, 850, 700]:
                     'spread': p_t - p_td
                 })
 
-# --- PRECISE FREEZING LEVEL DETERMINATION ---
+# --- PRECISE FREEZING LEVEL DETERMINATION (No Brackets) ---
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
     frz_raw = float(frz_raw_list[idx])
@@ -354,7 +354,7 @@ else:
     if t_temp <= 0:
         frz_disp = "SFC"
     else:
-        frz_disp = ">10,000 ft"
+        frz_disp = "> 10,000 ft"
         for i in range(1, len(thermal_profile)):
             lower = thermal_profile[i-1]
             upper = thermal_profile[i]
@@ -371,31 +371,36 @@ else:
 # --- CLOUD BASE ANALYSIS (CONVECTIVE VS STRATIFORM) ---
 t_950_list = h.get('temperature_925hPa')
 t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_950_list[idx] is not None) else t_temp
-is_stable = t_950 > (t_temp - 2.0)
 
-is_convective = (wx >= 80) or (not is_stable)
+# Fix: Only flag as explicitly convective if weather codes dictate it, or 
+# if the lapse rate is steep/unstable (> 3C per 1000ft). 925hPa is approx 2500ft AGL.
+lapse_rate_temp_drop = t_temp - t_950
+is_steep_lapse_rate = lapse_rate_temp_drop >= 7.5
+is_convective = (wx >= 80) or is_steep_lapse_rate
 
 if is_convective:
     # Rule of thumb for unstable boundary layer
     raw_base = max(0, sfc_spread * 400)
-    c_base_disp = f"{int(round(raw_base, -2)):,} ft (CONV)"
+    c_base_disp = f"{int(round(raw_base, -2)):,} ft CONV"
 else:
-    # NWP Tephigram analysis for stable layers
-    c_base_disp = ">10,000 ft (CLR)"
+    # NWP Tephigram analysis for stable layers (Table rules applied strictly)
+    c_base_disp = "> 10,000 ft CLR"
     c_amt = "CLR"
     
     # 1. Search for a solid ceiling (OVC/BKN)
     for layer in thermal_profile:
+        h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 3.0: 
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
-            c_base_disp = f"{int(round(layer['h'], -2)):,} ft ({c_amt})"
+            c_base_disp = f"{int(round(h_agl, -2)):,} ft {c_amt}"
             break
             
-    # 2. If no ceiling, search for scattered layers
+    # 2. If no ceiling found, search for scattered layers
     if c_amt == "CLR":
         for layer in thermal_profile:
+            h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 5.0:
-                c_base_disp = f"{int(round(layer['h'], -2)):,} ft (SCT)"
+                c_base_disp = f"{int(round(h_agl, -2)):,} ft SCT"
                 break
 
 raw_gst_list = h.get('wind_gusts_10m')
@@ -425,8 +430,8 @@ dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.ut
 astro = get_astronomical_data(lat, lon, dt_utc_exact, local_tz, tz_abbr)
 space_data = get_kp_index(dt_utc_exact)
 
-sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL (Below Horizon)"
-moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL (Below Horizon)"
+sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL"
+moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL"
 
 weather_str = get_weather_element(wx, w_spd)
 
@@ -467,7 +472,7 @@ for alt in [400, 300, 200, 100]:
     d_c_raw = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / max(0.1, u_h))) % 360
     d_c = format_dir(d_c_raw, s_c)
     
-    turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, t_temp, rh, terrain_env)
+    turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_convective, icing_cond, t_temp, rh, terrain_env)
     
     if int(s_c) == 0:
         mat_dir, mat_spd = "CALM", "0"
@@ -536,7 +541,7 @@ else:
         d_e = format_dir(d_e_raw, s_e)
         
         g_e = s_e + gust_delta
-        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, t_temp, rh, terrain_env)
+        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_convective, icing_cond, t_temp, rh, terrain_env)
         
         if int(s_e) == 0:
             mat_dir_ext, mat_spd_ext = "CALM", "0"
