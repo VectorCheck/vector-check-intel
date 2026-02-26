@@ -151,6 +151,37 @@ def hazard_lvl(h_str):
     if "LGT" in h_str: return 1
     return 0
 
+def calc_tactical_visibility(vis_raw_m, rh, w_spd, wx):
+    """
+    Translates and filters visibility to prevent NWP parametric hallucinations.
+    Applies synoptic Met Tech logic to override false low-visibility drops.
+    """
+    if vis_raw_m is not None:
+        vis_sm = float(vis_raw_m) / 1609.34
+    else:
+        if rh >= 95: vis_sm = 1.5
+        elif rh >= 90: vis_sm = 3.0
+        elif rh >= 80: vis_sm = 5.0
+        else: vis_sm = 10.0
+        
+    # 1. Trust active precipitation (Rain/Snow/Drizzle/T-Storms)
+    if wx >= 50:
+        return vis_sm
+        
+    # 2. Wind Mixing Override (Radiation fog blows away > 10kts)
+    if vis_sm < 3.0 and w_spd >= 10.0 and wx not in [45, 48]:
+        return max(vis_sm, 6.0)
+        
+    # 3. Dry Air Override (Mist/Haze requires high RH)
+    if vis_sm < 4.0 and rh < 85:
+        return max(vis_sm, 7.0)
+        
+    # 4. The "Humid but Clear" Override (Overrides parametric drops)
+    if vis_sm < 3.0 and wx <= 3 and rh < 95:
+        return max(vis_sm, 4.0)
+        
+    return vis_sm
+
 # ---------------------------------------------------------
 # SPATIAL ENGINES & CACHED DATA FETCH
 # ---------------------------------------------------------
@@ -355,19 +386,16 @@ for i in range(nearest_idx, max_idx + 1):
     wx_raw = h.get('weather_code', [0])
     wx = int(wx_raw[i]) if (wx_raw and len(wx_raw) > i and wx_raw[i] is not None) else 0
     
-    vis_raw_list = h.get('visibility')
-    if vis_raw_list and len(vis_raw_list) > i and vis_raw_list[i] is not None:
-        vis_sm = float(vis_raw_list[i]) / METERS_TO_SM
-    else:
-        rh_raw = h.get('relative_humidity_2m', [0])[i]
-        rh_v = int(rh_raw) if rh_raw is not None else 0
-        vis_sm = int((100-rh_v)/5 * 1.13) if rh_v > 0 else 10
-        
     t_temp_raw = h.get('temperature_2m', [0])[i]
     t_temp = float(t_temp_raw) if t_temp_raw is not None else 0.0
     rh_v = int(h.get('relative_humidity_2m', [0])[i]) if h.get('relative_humidity_2m', [0])[i] is not None else 0
     td = calc_td(t_temp, rh_v)
     sfc_spread = t_temp - td
+    
+    # Process Visibility using Tactical Override
+    vis_raw_list = h.get('visibility')
+    vis_raw_val = vis_raw_list[i] if vis_raw_list and len(vis_raw_list) > i else None
+    vis_sm = calc_tactical_visibility(vis_raw_val, rh_v, w_spd, wx)
     
     profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh_v}]
     for p in [1000, 925, 850, 700, 500, 250]:
@@ -393,11 +421,9 @@ for i in range(nearest_idx, max_idx + 1):
         c_amt = "CONV"
     else:
         search_profile = profile[1:] if len(profile) > 1 else profile
-        
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 3.0: 
-                # ADVANCED BOUNDARY LAYER DEWPOINT FILTER
                 if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50:
                     continue
                 c_base_agl = int(round(h_agl, -2))
@@ -557,18 +583,13 @@ sfc_spread = t_temp - td
 sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
 sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
+# Process Visibility using Tactical Override for the Dashboard
 vis_raw_list = h.get('visibility')
-if vis_raw_list and len(vis_raw_list) > idx and vis_raw_list[idx] is not None:
-    vis_m = float(vis_raw_list[idx])
-    vis_sm = vis_m / METERS_TO_SM
-    if vis_sm > 7: vis_disp = "> 7 SM"
-    else: vis_disp = f"{vis_sm:.1f} SM"
-else:
-    if t_temp_raw is not None and rh_raw is not None and rh > 0:
-        vis_est = int((100-rh)/5 * 1.13)
-        if vis_est > 7: vis_disp = "> 7 SM"
-        else: vis_disp = f"{vis_est} SM"
-    else: vis_disp = "NIL"
+vis_raw_val = vis_raw_list[idx] if vis_raw_list and len(vis_raw_list) > idx else None
+vis_sm = calc_tactical_visibility(vis_raw_val, rh, w_spd, wx)
+
+if vis_sm > 7: vis_disp = "> 7 SM"
+else: vis_disp = f"{vis_sm:.1f} SM"
 
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
 for p in [1000, 925, 850, 700, 500, 250]:
@@ -615,11 +636,9 @@ if is_convective:
     c_base_disp = f"{c_base_agl:,} ft CONV"
 else:
     search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
-    
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 3.0: 
-            # ADVANCED BOUNDARY LAYER DEWPOINT FILTER
             if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50:
                 continue
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
