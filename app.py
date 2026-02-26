@@ -39,7 +39,7 @@ st.markdown("""
 
 # 2. ZERO-COST AUTHENTICATION & LEGAL GATEWAY
 def check_password():
-    """Returns True if the user is authenticated and has accepted the EULA."""
+    """Returns True if the user is authenticated and has accepted the End User License Agreement."""
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
     if "eula_accepted" not in st.session_state:
@@ -85,7 +85,7 @@ This Agreement shall be governed by and construed in accordance with the laws of
     st.subheader("Operator Authentication")
     
     with st.form("login_form"):
-        eula_check = st.checkbox("I confirm I am the Pilot in Command (PIC) and I accept the terms of this EULA.")
+        eula_check = st.checkbox("I confirm I am the Pilot in Command (PIC) and I accept the terms of this End User License Agreement.")
         st.markdown("<br>", unsafe_allow_html=True)
         
         user = st.text_input("Operator ID")
@@ -95,7 +95,7 @@ This Agreement shall be governed by and construed in accordance with the laws of
         if submitted:
             if user in st.secrets.get("passwords", {}) and pwd == st.secrets["passwords"][user]:
                 if not eula_check:
-                    st.error("⚠️ REGULATORY HALT: You must accept the EULA to authenticate.")
+                    st.error("⚠️ REGULATORY HALT: You must accept the End User License Agreement to authenticate.")
                 else:
                     st.session_state["password_correct"] = True
                     st.session_state["eula_accepted"] = True
