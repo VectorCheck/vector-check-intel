@@ -40,14 +40,12 @@ st.markdown("""
 # 2. ZERO-COST AUTHENTICATION & LEGAL GATEWAY
 def check_password():
     """Returns True if the user is authenticated and has accepted the EULA."""
-    
-    # Initialize session states
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
     if "eula_accepted" not in st.session_state:
         st.session_state["eula_accepted"] = False
 
-    # If everything is cleared, let them in
+    # If already cleared, proceed to the dashboard
     if st.session_state["password_correct"] and st.session_state["eula_accepted"]:
         return True
 
@@ -56,7 +54,6 @@ def check_password():
     st.caption("Atmospheric Risk Management System - Restricted Access")
     st.divider()
 
-    # Step 1: EULA Acceptance
     st.subheader("End User License Agreement")
     eula_text = """
     **1. NOT A CERTIFIED BRIEFING:** This is a supplemental situational awareness tool. It DOES NOT replace official NAV CANADA or NOAA flight weather briefings.
@@ -68,53 +65,32 @@ def check_password():
     st.info(eula_text)
     
     eula_check = st.checkbox("I am the Pilot in Command (PIC) and I accept the terms of this EULA.")
-
-    # Step 2: Authentication
+    
     st.subheader("Operator Authentication")
     
-    def verify_credentials():
-        user = st.session_state["username_input"]
-        pwd = st.session_state["password_input"]
+    # Using st.form prevents the page from refreshing on every keystroke
+    with st.form("login_form"):
+        user = st.text_input("Operator ID")
+        pwd = st.text_input("Passcode", type="password")
+        submitted = st.form_submit_button("Acknowledge & Authenticate")
         
-        # Verify against Streamlit secrets
-        if user in st.secrets.get("passwords", {}) and pwd == st.secrets["passwords"][user]:
-            if not st.session_state.get("eula_checkbox_state", False):
-                st.error("⚠️ REGULATORY HALT: You must accept the EULA to authenticate.")
-                st.session_state["password_correct"] = False
+        if submitted:
+            if user in st.secrets.get("passwords", {}) and pwd == st.secrets["passwords"][user]:
+                if not eula_check:
+                    st.error("⚠️ REGULATORY HALT: You must accept the EULA to authenticate.")
+                else:
+                    st.session_state["password_correct"] = True
+                    st.session_state["eula_accepted"] = True
+                    st.session_state["active_operator"] = user
+                    try:
+                        log_action(user, 0.0, 0.0, "SYS", "AUTH_AND_EULA_SUCCESS")
+                    except:
+                        pass
+                    st.rerun()
             else:
-                st.session_state["password_correct"] = True
-                st.session_state["eula_accepted"] = True
-                st.session_state["active_operator"] = user
-                log_action(user, 0.0, 0.0, "SYS", "AUTH_AND_EULA_SUCCESS")
-                # Clean up memory
-                del st.session_state["password_input"]  
-                del st.session_state["username_input"]
-        else:
-            st.session_state["password_correct"] = False
-            st.error("⚠️ UNAUTHORIZED: Invalid Operator ID or Passcode.")
-
-    # Track checkbox state dynamically
-    st.session_state["eula_checkbox_state"] = eula_check
-    
-    st.text_input("Operator ID", key="username_input")
-    st.text_input("Passcode", type="password", key="password_input")
-    st.button("Acknowledge & Authenticate", on_click=verify_credentials)
-    
+                st.error("⚠️ UNAUTHORIZED: Invalid Operator ID or Passcode.")
+                
     return False
-
-if not check_password():
-    st.stop()
-        
-    elif not st.session_state["password_correct"]:
-        st.title("Vector Check Aerial Group Inc.")
-        st.caption("Atmospheric Risk Management System - Restricted Access")
-        st.text_input("Operator ID", key="username")
-        st.text_input("Passcode", type="password", key="password")
-        st.button("Authenticate", on_click=password_entered)
-        st.error("⚠️ UNAUTHORIZED: Invalid Operator ID or Passcode.")
-        return False
-    else:
-        return True
 
 if not check_password():
     st.stop()
@@ -371,7 +347,6 @@ else:
 sfc_elevation = data.get('elevation', 0) * 3.28084
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
 
-# Updated to the universally supported WMO mandatory pressure levels
 for p in [1000, 925, 850, 700, 500, 250]:
     gh_list = h.get(f'geopotential_height_{p}hPa')
     t_list = h.get(f'temperature_{p}hPa')
