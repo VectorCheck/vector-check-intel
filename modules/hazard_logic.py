@@ -55,8 +55,8 @@ def calculate_icing_profile(h, idx, wx_code):
 def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_convective, icing_cond, alt_temp, alt_rh, terrain_type="Land", cloud_base_agl=10000):
     """
     Evaluates turbulence and icing risk. 
-    Strict Visible Moisture Gate enforced: Separates Dry Snow from Wet Snow/Liquid Precip 
-    to prevent false-positive structural icing below cloud decks.
+    Mechanical turbulence is capped at 3000ft. 
+    Free stream turbulence (>3000ft) is calculated via ICAO vertical wind shear gradients.
     """
     w_spd = float(wind_spd) if wind_spd is not None else 0.0
     s_spd = float(sfc_spd) if sfc_spd is not None else 0.0
@@ -66,7 +66,6 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_convective, icing_cond, al
     rh_val = int(alt_rh) if alt_rh is not None else 0
     
     max_wind = max(w_spd, g_spd)
-    gust_delta = max(0, g_spd - s_spd) 
     
     turb_type = "MECH" 
     turb_sev = "NIL"
@@ -95,10 +94,21 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_convective, icing_cond, al
             elif max_wind >= 25: turb_sev = "MOD"
             elif max_wind >= 15: turb_sev = "LGT"
     else:
+        # Free Stream Flow (>3000ft): ICAO Vertical Wind Shear Calculation
         turb_type = "SHEAR"
-        if gust_delta >= 15: turb_sev = "SEV"
-        elif gust_delta >= 10: turb_sev = "MOD"
+        
+        # Calculate shear gradient (kts per 1000 ft) between surface and current altitude
+        vertical_shear_per_1000ft = abs(w_spd - s_spd) / max(1.0, (alt / 1000.0))
+        
+        # Local gust spread at altitude (CAT indicator)
+        local_gust_spread = max(0, g_spd - w_spd)
+        
+        if vertical_shear_per_1000ft >= 10 or local_gust_spread >= 15:
+            turb_sev = "SEV"
+        elif vertical_shear_per_1000ft >= 6 or local_gust_spread >= 10:
+            turb_sev = "MOD"
 
+    # Absolute Convective Override (Overrides all altitudes)
     if wx_val in [95, 96, 99]:
         turb_type = "CONV"
         turb_sev = "SEV"
@@ -121,7 +131,6 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_convective, icing_cond, al
             # Wet Snow physically sticks to airframes (Temp between 0 and -3C)
             is_wet_snow = (wx_val in snow_wx_codes) and (0 >= t_val >= -3.0)
             
-            # If we are below the cloud deck and encountering dry snow (or nothing), icing is physically impossible.
             if not (in_cloud or has_liquid_precip or is_wet_snow):
                 ice = "NIL"
             else:
@@ -132,7 +141,7 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_convective, icing_cond, al
                 elif has_liquid_precip or is_wet_snow:
                     ice = "MOD MX"
                 elif wx_val == 48 and alt <= 1000:
-                    ice = "MOD RIME" # Freezing fog impact layer
+                    ice = "MOD RIME" 
                 elif rh_val >= 80: 
                     if 0 >= t_val >= -15:
                         ice = "MOD RIME" if rh_val >= 90 else "LGT RIME"
