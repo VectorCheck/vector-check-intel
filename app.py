@@ -7,6 +7,7 @@ import urllib.request
 from datetime import datetime, timezone
 from timezonefinder import TimezoneFinder
 import pytz
+import plotly.graph_objects as go
 
 # Import Vector Check Modules
 from modules.data_ingest import get_aviation_weather, fetch_mission_data
@@ -218,7 +219,6 @@ def get_nearest_icao_station(user_lat, user_lon):
         pass
     return {"icao": "NONE", "dist": None, "dir": ""}
 
-# API SHIELD: Cache data to prevent HTTP 429 Too Many Requests errors
 @st.cache_data(ttl=900)
 def fetch_weather_payload(fetch_lat, fetch_lon, fetch_model):
     return fetch_mission_data(fetch_lat, fetch_lon, fetch_model)
@@ -311,7 +311,7 @@ max_idx = min(len(h["time"]) - 1, nearest_idx + 48)
 valid_times_display = times_display[nearest_idx : max_idx + 1]
 
 # ---------------------------------------------------------
-# 48-HOUR IMPACT MATRIX UI & LOGIC
+# INTERACTIVE IMPACT MATRIX UI & LOGIC
 # ---------------------------------------------------------
 st.subheader("Impact Matrix")
 
@@ -323,8 +323,10 @@ with st.expander("Configure Operational Constraints"):
     t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=1)
     t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=0)
 
-# Build the Timeline Data
-timeline_html_blocks = []
+# Build the Timeline Data for Plotly
+x_labels = []      # Hidden unique IDs to prevent Plotly aggregation
+hover_texts = []   # Purely formatted tooltip strings
+color_vals = []    # Hex colors
 
 for i in range(nearest_idx, max_idx + 1):
     failures = []
@@ -416,34 +418,65 @@ for i in range(nearest_idx, max_idx + 1):
     if hazard_lvl(turb) > hazard_lvl(t_turb): failures.append(f"Turb ({turb})")
     if hazard_lvl(ice) > hazard_lvl(t_ice): failures.append(f"Ice ({ice})")
     
-    time_str = datetime.fromisoformat(h["time"][i]).replace(tzinfo=timezone.utc).astimezone(local_tz).strftime('%H:%M %Z')
+    dt_local = datetime.fromisoformat(h["time"][i]).replace(tzinfo=timezone.utc).astimezone(local_tz)
+    time_str = dt_local.strftime('%H:%M')
+    
+    # Unique ID required for Plotly parsing
+    x_labels.append(f"T{i}") 
     
     if len(failures) == 0:
-        color = "#1E8449"  # Deep Forest Green
-        tooltip = f"{time_str} | FLIGHT AUTHORIZED"
+        color_vals.append("#1E8449") # Dark Forest Green
+        hover_texts.append(f"{time_str} | FLIGHT AUTHORIZED")
     else:
-        color = "#B82E2E"  # Deep Crimson Red
-        tooltip = f"{time_str} | " + ", ".join(failures)
-        
-    border_right = "border-right: 1px solid #1B1E23;" if i < max_idx else ""
-    block_html = f'<div style="flex: 1; background-color: {color}; {border_right}" title="{tooltip}"></div>'
-    timeline_html_blocks.append(block_html)
+        color_vals.append("#B82E2E") # Deep Crimson
+        hover_texts.append(f"{time_str} | " + ", ".join(failures))
 
-# Render the flexbox UI
-ruler_html = f"""
-<div style="display: flex; width: 100%; height: 35px; border-radius: 4px; overflow: hidden; border: 1px solid #3E444E; margin-bottom: 5px;">
-    {''.join(timeline_html_blocks)}
-</div>
-<div style="display: flex; justify-content: space-between; font-size: 0.8rem; color: #A0A4AB; font-weight: bold; margin-bottom: 25px;">
-    <span>NOW</span>
-    <span>+12 HR</span>
-    <span>+24 HR</span>
-    <span>+36 HR</span>
-    <span>+48 HR</span>
-</div>
-"""
-st.markdown(ruler_html, unsafe_allow_html=True)
+# We map exactly every 4th label to print cleanly on the axis
+tick_vals = x_labels[::4]
+tick_texts = [datetime.fromisoformat(h["time"][nearest_idx + x_labels.index(val)]).replace(tzinfo=timezone.utc).astimezone(local_tz).strftime('%H:%M') for val in tick_vals]
 
+# Render Seamless Clickable Bar Chart as Matrix
+fig = go.Figure(data=go.Bar(
+    x=x_labels,
+    y=[1] * len(x_labels),
+    marker_color=color_vals,
+    text=hover_texts,
+    hoverinfo="text",
+    width=1 
+))
+
+fig.update_layout(
+    height=70, 
+    margin=dict(l=0, r=0, t=0, b=25),
+    plot_bgcolor="#1B1E23",
+    paper_bgcolor="#1B1E23",
+    xaxis=dict(
+        tickmode='array',
+        tickvals=tick_vals,
+        ticktext=tick_texts,
+        tickangle=0,
+        tickfont=dict(color="#A0A4AB", size=11, family="Source Sans Pro, sans-serif"),
+        showgrid=False,
+        zeroline=False,
+        fixedrange=True
+    ),
+    yaxis=dict(showticklabels=False, showgrid=False, zeroline=False, range=[0, 1], fixedrange=True),
+    dragmode=False,
+    showlegend=False
+)
+
+# Plotly Event Listener
+try:
+    event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points", key="impact_matrix_chart", config={'displayModeBar': False})
+    if event and "selection" in event and "points" in event["selection"] and len(event["selection"]["points"]) > 0:
+        clicked_idx = event["selection"]["points"][0]["pointIndex"]
+        if st.session_state.get("forecast_slider") != valid_times_display[clicked_idx]:
+            st.session_state.forecast_slider = valid_times_display[clicked_idx]
+            st.rerun()
+except Exception:
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+st.markdown("<div style='margin-bottom: 30px;'></div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------
 # FORECAST DASHBOARD EXECUTION (SINGLE HOUR)
