@@ -10,16 +10,17 @@ def fetch_mission_data(lat, lon, model_url):
     """
     is_gem = "gem" in model_url
     
-    # 1. Base Variables
+    # 1. Base Variables (Added 'visibility' for microphysics engine)
     hourly_params = [
         "temperature_2m", "relative_humidity_2m", "weather_code", 
-        "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m"
+        "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m",
+        "visibility"
     ]
     
     if not is_gem:
         hourly_params.append("freezing_level_height")
 
-    # 2. WMO Standard Pressure Levels (Now includes RH for Tephigram Cloud Analysis)
+    # 2. WMO Standard Pressure Levels (Includes RH for Tephigram Cloud Analysis)
     pressure_levels = [1000, 925, 850, 700]
     for p in pressure_levels:
         hourly_params.extend([
