@@ -1,9 +1,9 @@
 import re
 
 # --- VECTOR CHECK AERIAL GROUP INC. : OPERATIONAL CONSTANTS ---
-# These values are locked to prevent inadvertent logic alterations.
 URBAN_VENTURI_MULTIPLIER = 1.25
 MECH_TURB_ALTITUDE_CAP_FT = 3000
+LAPSE_RATE_STANDARD_C_PER_1000FT = 1.98
 
 def get_weather_element(wx_code, wind_spd):
     """Translates WMO weather codes into human-readable text."""
@@ -30,7 +30,6 @@ def calculate_icing_profile(h, idx, wx_code):
     rh = int(rh_raw) if rh_raw is not None else 0
     wx = int(wx_code) if wx_code is not None else 0
     
-    # Table 3 Overrides (Freezing Precipitation)
     if wx in [66, 67]: 
         return "SEV CLR"
     elif wx in [56, 57, 77]: 
@@ -48,10 +47,11 @@ def calculate_icing_profile(h, idx, wx_code):
             
     return "NIL"
 
-def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_convective, icing_cond, alt_temp, alt_rh, terrain_type="Land"):
+def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_convective, icing_cond, alt_temp, alt_rh, terrain_type="Land", cloud_base_agl=10000):
     """
-    Evaluates turbulence and icing risk with strict boundary layer caps.
-    Utilizes interpolated atmospheric data for exact altitude conditions.
+    Evaluates turbulence and icing risk. 
+    Strict Visible Moisture Gate enforced: Icing cannot occur in clear air below cloud base 
+    unless precipitation or fog is present.
     """
     w_spd = float(wind_spd) if wind_spd is not None else 0.0
     s_spd = float(sfc_spd) if sfc_spd is not None else 0.0
@@ -90,49 +90,55 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_convective, icing_cond, al
             elif max_wind >= 25: turb_sev = "MOD"
             elif max_wind >= 15: turb_sev = "LGT"
     else:
-        # Free Stream Flow (Shear driven)
         turb_type = "SHEAR"
         if gust_delta >= 15: turb_sev = "SEV"
         elif gust_delta >= 10: turb_sev = "MOD"
 
-    # Absolute Convective Override
     if wx_val in [95, 96, 99]:
         turb_type = "CONV"
         turb_sev = "SEV"
 
     turb = f"{turb_sev} {turb_type}" if turb_sev != "NIL" else "NIL"
         
-    # --- ICING ALOFT LOGIC ---
+    # --- ICING ALOFT LOGIC (VISIBLE MOISTURE GATE) ---
     ice = "NIL"
     
     if alt > 0:
-        # Absolute physics constraint: No icing > 0C or < -40C
         if t_val > 0 or t_val < -40:
             ice = "NIL"
         else:
-            # 1. Precipitation overrules RH
-            if wx_val in [66, 67]: 
-                ice = "SEV CLR"
-            elif wx_val in [95, 96, 99]: 
-                ice = "SEV CLR"
-            elif wx_val in [56, 57, 77]: 
-                ice = "MOD MX"
-            elif wx_val in [80, 81, 82, 85, 86]: 
-                ice = "MOD MX"
-            # 2. Stratiform visible moisture (Altitude RH >= 80%)
-            elif rh_val >= 80: 
-                if 0 >= t_val >= -15:
-                    if rh_val >= 90:
-                        ice = "MOD RIME" 
-                    else:
+            in_cloud = alt >= cloud_base_agl
+            has_precip_or_fog = wx_val >= 45
+            
+            # If we are below the cloud deck and there is no precip/fog, structural icing is physically impossible.
+            if not (in_cloud or has_precip_or_fog):
+                ice = "NIL"
+            else:
+                # 1. Precipitation overrules RH
+                if wx_val in [66, 67]: 
+                    ice = "SEV CLR"
+                elif wx_val in [95, 96, 99]: 
+                    ice = "SEV CLR"
+                elif wx_val in [56, 57, 77]: 
+                    ice = "MOD MX"
+                elif wx_val in [80, 81, 82, 85, 86]: 
+                    ice = "MOD MX"
+                elif wx_val == 48 and alt <= 1000:
+                    ice = "MOD RIME" # Freezing fog impact layer
+                # 2. Stratiform visible moisture (In cloud)
+                elif rh_val >= 80: 
+                    if 0 >= t_val >= -15:
+                        if rh_val >= 90:
+                            ice = "MOD RIME" 
+                        else:
+                            ice = "LGT RIME"
+                    elif -15 > t_val >= -20:
                         ice = "LGT RIME"
-                elif -15 > t_val >= -20:
-                    ice = "LGT RIME"
-                elif t_val < -20:
-                    if rh_val >= 95:
-                        ice = "LGT RIME"
-                    else:
-                        ice = "NIL"
+                    elif t_val < -20:
+                        if rh_val >= 95:
+                            ice = "LGT RIME"
+                        else:
+                            ice = "NIL"
             
     return turb, ice
 
@@ -149,34 +155,30 @@ def apply_tactical_highlights(text):
     formatted_lines = []
     
     for line in lines:
-        # Priority 1: Freezing Conditions (Worst Case)
         if re.search(r'\b(FZ[A-Z]*)\b', line):
             formatted_lines.append(f'<span class="fz-warn">{line}</span>')
             continue
             
-        # Priority 2: IFR (Ceiling < 1000ft, OR VV, OR Vis < 3SM)
         is_ifr = False
-        if re.search(r'\b(BKN|OVC|VV)(00[0-9])\b', line): # 000 to 009
+        if re.search(r'\b(BKN|OVC|VV)(00[0-9])\b', line): 
             is_ifr = True
-        elif re.search(r'\b([M]?[0-2](?:\s?[1-3]/[2-4])?SM)\b', line): # Matches < 3SM fractions
+        elif re.search(r'\b([M]?[0-2](?:\s?[1-3]/[2-4])?SM)\b', line): 
             is_ifr = True
             
         if is_ifr:
             formatted_lines.append(f'<span class="ifr-text">{line}</span>')
             continue
             
-        # Priority 3: MVFR (Ceiling 1000-3000ft OR Vis 3-5SM)
         is_mvfr = False
-        if re.search(r'\b(BKN|OVC)(0[1-2][0-9]|030)\b', line): # 010 to 030
+        if re.search(r'\b(BKN|OVC)(0[1-2][0-9]|030)\b', line): 
             is_mvfr = True
-        elif re.search(r'\b([3-5]SM)\b', line): # 3SM, 4SM, 5SM
+        elif re.search(r'\b([3-5]SM)\b', line): 
             is_mvfr = True
             
         if is_mvfr:
             formatted_lines.append(f'<span class="mvfr-text">{line}</span>')
             continue
             
-        # Priority 4: VFR / No Highlight
         formatted_lines.append(line)
         
     return '\n'.join(formatted_lines)
