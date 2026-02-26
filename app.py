@@ -301,6 +301,26 @@ sfc_spread = t_temp - td
 sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
 sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
+# --- NATIVE VISIBILITY EXTRACTION & CAPPING ---
+vis_raw_list = h.get('visibility')
+if vis_raw_list and len(vis_raw_list) > idx and vis_raw_list[idx] is not None:
+    vis_m = float(vis_raw_list[idx])
+    vis_sm = vis_m / 1609.34 # Convert meters to Statute Miles
+    if vis_sm > 7:
+        vis_disp = "> 7 SM"
+    else:
+        vis_disp = f"{vis_sm:.1f} SM"
+else:
+    # Fallback to RH estimator if API fails to provide visibility array
+    if t_temp_raw is not None and rh_raw is not None and rh > 0:
+        vis_est = int((100-rh)/5 * 1.13)
+        if vis_est > 7:
+            vis_disp = "> 7 SM (Est)"
+        else:
+            vis_disp = f"{vis_est} SM (Est)"
+    else:
+        vis_disp = "N/A"
+
 # --- THERMAL PROFILE GENERATION ---
 sfc_elevation = data.get('elevation', 0) * 3.28084
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread}]
@@ -429,7 +449,7 @@ c[1].metric("RH", f"{rh}%")
 c[2].metric("Wind Dir", sfc_dir_disp)
 c[3].metric(f"Wind Spd", f"{sfc_spd_disp} {raw_wind_unit}")
 c[4].metric("Weather", weather_str)
-c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm")
+c[5].metric("Visibility", vis_disp)
 c[6].metric("Freezing LVL", frz_disp)
 c[7].metric("Cloud Base", c_base_disp)
 
@@ -637,7 +657,7 @@ csv_header = (
     f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\n"
     f"Wind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\n"
     f"Weather: {weather_str}\n"
-    f"Visibility (Est): {int((100-rh)/5 * 1.13)} sm\n"
+    f"Visibility: {vis_disp}\n"
     f"Cloud Base: {c_base_disp} | Freezing Level: {frz_disp}\n\n"
     "--- ASTRONOMICAL & SPACE WEATHER ---\n"
     f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
