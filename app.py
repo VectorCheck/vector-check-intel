@@ -331,7 +331,6 @@ color_vals = []
 for i in range(nearest_idx, max_idx + 1):
     failures = []
     
-    # Extract Base Variables
     w_raw = h.get('wind_speed_10m', [0])[i]
     w_spd = (float(w_raw) if w_raw is not None else 0.0) * k_conv
     
@@ -342,7 +341,6 @@ for i in range(nearest_idx, max_idx + 1):
     wx_raw = h.get('weather_code', [0])
     wx = int(wx_raw[i]) if (wx_raw and len(wx_raw) > i and wx_raw[i] is not None) else 0
     
-    # Extract Visibility
     vis_raw_list = h.get('visibility')
     if vis_raw_list and len(vis_raw_list) > i and vis_raw_list[i] is not None:
         vis_sm = float(vis_raw_list[i]) / METERS_TO_SM
@@ -351,7 +349,6 @@ for i in range(nearest_idx, max_idx + 1):
         rh_v = int(rh_raw) if rh_raw is not None else 0
         vis_sm = int((100-rh_v)/5 * 1.13) if rh_v > 0 else 10
         
-    # Generate Profile for Cloud Base Calculation
     t_temp_raw = h.get('temperature_2m', [0])[i]
     t_temp = float(t_temp_raw) if t_temp_raw is not None else 0.0
     rh_v = int(h.get('relative_humidity_2m', [0])[i]) if h.get('relative_humidity_2m', [0])[i] is not None else 0
@@ -370,7 +367,6 @@ for i in range(nearest_idx, max_idx + 1):
                 if p_gh > profile[-1]['h']:
                     profile.append({'h': p_gh, 't': float(t_val), 'td': calc_td(float(t_val), int(rh_val)), 'spread': float(t_val) - calc_td(float(t_val), int(rh_val)), 'rh': int(rh_val)})
 
-    # Calc Cloud Base
     t_950_list = h.get('temperature_925hPa')
     t_950 = float(t_950_list[i]) if (t_950_list and len(t_950_list) > i and t_950_list[i] is not None) else t_temp
     is_convective = (wx >= 80) or ((t_temp - t_950) >= 7.5)
@@ -390,7 +386,6 @@ for i in range(nearest_idx, max_idx + 1):
                     c_base_agl = int(round(max(0, layer['h'] - sfc_elevation), -2))
                     break
 
-    # Calculate Tactical Hazards at 400ft AGL
     alt_msl = sfc_elevation + 400
     alt_t, alt_rh = get_interp_thermals(alt_msl, profile)
     icing_cond = calculate_icing_profile(h, i, wx)
@@ -409,7 +404,6 @@ for i in range(nearest_idx, max_idx + 1):
     
     turb, ice = get_turb_ice(400, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
 
-    # Execute Threshold Gate Logic
     max_wind_val = max(w_spd, gst)
     if max_wind_val > t_wind: failures.append(f"Wind ({int(max_wind_val)}KT)")
     if vis_sm < t_vis: failures.append(f"Vis ({vis_sm:.1f}SM)")
@@ -429,7 +423,6 @@ for i in range(nearest_idx, max_idx + 1):
         color_vals.append("#B82E2E") 
         hover_texts.append(f"{time_str} | " + ", ".join(failures))
 
-# Logic for smart Date injection on the X-axis
 tick_vals = x_labels[::4]
 tick_texts = []
 last_date_str = None
@@ -441,14 +434,12 @@ for val in tick_vals:
     t_str = dt_local.strftime('%H:%M')
     d_str = dt_local.strftime('%b %d')
     
-    # If it's the first tick, or the date just rolled over past midnight, add the date
     if last_date_str is None or d_str != last_date_str:
         tick_texts.append(f"{t_str}<br><b>{d_str}</b>")
         last_date_str = d_str
     else:
         tick_texts.append(t_str)
 
-# Render Seamless Clickable Bar Chart as Matrix
 fig = go.Figure(data=go.Bar(
     x=x_labels,
     y=[1] * len(x_labels),
@@ -478,15 +469,17 @@ fig.update_layout(
     showlegend=False
 )
 
-# Plotly Event Listener
+# Plotly Event Listener - Specifically catching TypeError to prevent swallowing rerun loops
 try:
     event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points", key="impact_matrix_chart", config={'displayModeBar': False})
     if event and "selection" in event and "points" in event["selection"] and len(event["selection"]["points"]) > 0:
         clicked_idx = event["selection"]["points"][0]["pointIndex"]
-        if st.session_state.get("forecast_slider") != valid_times_display[clicked_idx]:
-            st.session_state.forecast_slider = valid_times_display[clicked_idx]
+        target_time = valid_times_display[clicked_idx]
+        if st.session_state.get("forecast_slider") != target_time:
+            st.session_state.forecast_slider = target_time
             st.rerun()
-except Exception:
+except TypeError:
+    # Fallback for Streamlit versions < 1.35.0
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
 st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
