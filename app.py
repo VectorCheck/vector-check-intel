@@ -54,28 +54,36 @@ def check_password():
     st.caption("Atmospheric Risk Management System - Restricted Access")
     st.divider()
 
-    st.subheader("End User License Agreement & Assumption of Risk")
+    st.subheader("End User License Agreement & Proprietary Rights")
     
     eula_text = """
-<div style="color: #A0A4AB; font-size: 0.9rem; line-height: 1.5; margin-bottom: 20px;">
+<div style="color: #A0A4AB; font-size: 0.85rem; line-height: 1.5; margin-bottom: 20px; height: 250px; overflow-y: scroll; padding: 15px; border: 1px solid #3E444E; background-color: #15171A; border-radius: 5px;">
 <strong>1. UNAUTHORIZED FOR PRIMARY DECISION MAKING (NOT A CERTIFIED BRIEFING)</strong><br>
 This Atmospheric Risk Management System is an uncertified, supplemental situational awareness tool. It aggregates and visualizes raw numerical weather prediction (NWP) models. It is STRICTLY PROHIBITED to use this software as a primary or sole source of aeronautical weather information. It DOES NOT replace, nor is it an alternative to, official flight weather briefings provided by NAV CANADA, Environment and Climate Change Canada (ECCC), NOAA, or other designated civil aviation authorities.
 <br><br>
 <strong>2. ABSOLUTE PILOT IN COMMAND (PIC) RESPONSIBILITY</strong><br>
 In accordance with Transport Canada Civil Aviation (TCCA) regulations, the Pilot in Command (PIC) retains absolute, non-transferable authority and responsibility for the safe operation of the aircraft. Atmospheric models are inherently flawed, subject to latency, and cannot accurately predict micro-climates, sudden localized shear, or boundary layer anomalies. Vector Check Aerial Group Inc. does not clear, authorize, or endorse any flight operations.
 <br><br>
-<strong>3. MAXIMUM LIMITATION OF LIABILITY</strong><br>
+<strong>3. INTELLECTUAL PROPERTY & PROPRIETARY ALGORITHMS</strong><br>
+All meteorological algorithms, hazard matrices, logic engines (including but not limited to the Visible Moisture Gate, atmospheric interpolation, and Urban Venturi multipliers), source code, and visual interfaces contained within this software are the exclusive intellectual property and trade secrets of Vector Check Aerial Group Inc. This agreement grants you a limited, non-exclusive, revocable, non-transferable license to use the software solely for internal operational awareness.
+<br><br>
+<strong>4. RESTRICTIONS ON USE & NON-COMPETE</strong><br>
+You are strictly prohibited from copying, scraping, reverse-engineering, decompiling, or otherwise attempting to extract the underlying mathematical matrices, proprietary thresholds, or source code. You may not use this software, its outputs, or its methodologies to develop, train, or inform any competing meteorological, aviation, or software product.
+<br><br>
+<strong>5. MAXIMUM LIMITATION OF LIABILITY</strong><br>
 This software is provided "AS IS" and "AS AVAILABLE" with zero warranties, express or implied. To the maximum extent permitted by Canadian law, Vector Check Aerial Group Inc., its directors, officers, and affiliates shall bear ZERO LIABILITY for any direct, indirect, punitive, or consequential damages. This includes, but is not limited to: loss of airframes, destruction of payloads, property damage, personal injury, death, loss of revenue, or regulatory fines resulting from the use of, or inability to use, this software.
 <br><br>
-<strong>4. INDEMNIFICATION</strong><br>
+<strong>6. INDEMNIFICATION</strong><br>
 By accessing this software, you agree to fully indemnify, defend, and hold harmless Vector Check Aerial Group Inc. from any and all claims, lawsuits, liabilities, penalties, or legal fees arising from your flight operations, your violation of any aviation regulations, or your misinterpretation of the data provided herein.
+<br><br>
+<strong>7. GOVERNING LAW & JURISDICTION</strong><br>
+This Agreement shall be governed by and construed in accordance with the laws of the Province of Ontario and the federal laws of Canada applicable therein, without regard to its conflict of law provisions. Any legal action or proceeding arising under this Agreement will be brought exclusively in the federal or provincial courts located in Ontario, Canada.
 </div>
     """
     st.markdown(eula_text, unsafe_allow_html=True)
     
     st.subheader("Operator Authentication")
     
-    # Using st.form prevents the page from refreshing on every keystroke
     with st.form("login_form"):
         eula_check = st.checkbox("I confirm I am the Pilot in Command (PIC) and I accept the terms of this EULA.")
         st.markdown("<br>", unsafe_allow_html=True)
