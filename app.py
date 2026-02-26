@@ -324,9 +324,9 @@ with st.expander("Configure Operational Constraints"):
     t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=0)
 
 # Build the Timeline Data for Plotly
-x_labels = []      # Hidden unique IDs to prevent Plotly aggregation
-hover_texts = []   # Purely formatted tooltip strings
-color_vals = []    # Hex colors
+x_labels = []      
+hover_texts = []   
+color_vals = []    
 
 for i in range(nearest_idx, max_idx + 1):
     failures = []
@@ -395,7 +395,6 @@ for i in range(nearest_idx, max_idx + 1):
     alt_t, alt_rh = get_interp_thermals(alt_msl, profile)
     icing_cond = calculate_icing_profile(h, i, wx)
     
-    # Upper wind calc for 400ft shear interpolation
     u_v_list = h.get('wind_speed_1000hPa')
     if u_v_list and len(u_v_list) > i and u_v_list[i] is not None:
         u_v = float(u_v_list[i]) * k_conv
@@ -421,33 +420,47 @@ for i in range(nearest_idx, max_idx + 1):
     dt_local = datetime.fromisoformat(h["time"][i]).replace(tzinfo=timezone.utc).astimezone(local_tz)
     time_str = dt_local.strftime('%H:%M')
     
-    # Unique ID required for Plotly parsing
     x_labels.append(f"T{i}") 
     
     if len(failures) == 0:
-        color_vals.append("#1E8449") # Dark Forest Green
+        color_vals.append("#1E8449") 
         hover_texts.append(f"{time_str} | FLIGHT AUTHORIZED")
     else:
-        color_vals.append("#B82E2E") # Deep Crimson
+        color_vals.append("#B82E2E") 
         hover_texts.append(f"{time_str} | " + ", ".join(failures))
 
-# We map exactly every 4th label to print cleanly on the axis
+# Logic for smart Date injection on the X-axis
 tick_vals = x_labels[::4]
-tick_texts = [datetime.fromisoformat(h["time"][nearest_idx + x_labels.index(val)]).replace(tzinfo=timezone.utc).astimezone(local_tz).strftime('%H:%M') for val in tick_vals]
+tick_texts = []
+last_date_str = None
+
+for val in tick_vals:
+    idx_for_val = nearest_idx + x_labels.index(val)
+    dt_local = datetime.fromisoformat(h["time"][idx_for_val]).replace(tzinfo=timezone.utc).astimezone(local_tz)
+    
+    t_str = dt_local.strftime('%H:%M')
+    d_str = dt_local.strftime('%b %d')
+    
+    # If it's the first tick, or the date just rolled over past midnight, add the date
+    if last_date_str is None or d_str != last_date_str:
+        tick_texts.append(f"{t_str}<br><b>{d_str}</b>")
+        last_date_str = d_str
+    else:
+        tick_texts.append(t_str)
 
 # Render Seamless Clickable Bar Chart as Matrix
 fig = go.Figure(data=go.Bar(
     x=x_labels,
     y=[1] * len(x_labels),
     marker_color=color_vals,
-    text=hover_texts,
-    hoverinfo="text",
+    customdata=hover_texts, 
+    hovertemplate="%{customdata}<extra></extra>", 
     width=1 
 ))
 
 fig.update_layout(
-    height=70, 
-    margin=dict(l=0, r=0, t=0, b=25),
+    height=90, 
+    margin=dict(l=0, r=0, t=0, b=40),
     plot_bgcolor="#1B1E23",
     paper_bgcolor="#1B1E23",
     xaxis=dict(
@@ -476,7 +489,7 @@ try:
 except Exception:
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-st.markdown("<div style='margin-bottom: 30px;'></div>", unsafe_allow_html=True)
+st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------
 # FORECAST DASHBOARD EXECUTION (SINGLE HOUR)
