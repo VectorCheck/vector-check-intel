@@ -45,11 +45,9 @@ def check_password():
     if "eula_accepted" not in st.session_state:
         st.session_state["eula_accepted"] = False
 
-    # If already cleared, proceed to the dashboard
     if st.session_state["password_correct"] and st.session_state["eula_accepted"]:
         return True
 
-    # --- RENDER THE GATEWAY UI ---
     st.title("Vector Check Aerial Group Inc.")
     st.caption("Atmospheric Risk Management System - Restricted Access")
     st.divider()
@@ -114,7 +112,46 @@ if not check_password():
     st.stop()
 
 # ---------------------------------------------------------
-# SPATIAL ENGINES
+# HELPER FUNCTIONS (Elevated for Global Use)
+# ---------------------------------------------------------
+def calc_td(t, rh):
+    if rh <= 0: return t
+    a = 17.625
+    b = 243.04
+    alpha = math.log(rh / 100.0) + ((a * t) / (b + t))
+    return (b * alpha) / (a - alpha)
+
+def get_interp_thermals(alt_msl, profile):
+    if not profile: return 0.0, 0
+    if alt_msl <= profile[0]['h']: return profile[0]['t'], profile[0]['rh']
+    if alt_msl >= profile[-1]['h']: return profile[-1]['t'], profile[-1]['rh']
+    for i in range(len(profile)-1):
+        if profile[i]['h'] <= alt_msl <= profile[i+1]['h']:
+            lower = profile[i]
+            upper = profile[i+1]
+            frac = (alt_msl - lower['h']) / (upper['h'] - lower['h']) if upper['h'] != lower['h'] else 0
+            i_t = lower['t'] + frac * (upper['t'] - lower['t'])
+            i_rh = lower['rh'] + frac * (upper['rh'] - lower['rh'])
+            return i_t, int(i_rh)
+    return profile[0]['t'], profile[0]['rh']
+
+def format_dir(d, spd):
+    r = int(round(float(d), -1)) % 360
+    if r == 0 and spd > 0: return 360
+    if spd == 0: return 0
+    return r
+
+def hazard_lvl(h_str):
+    """Translates text hazard strings into comparable numeric severities."""
+    h_str = h_str.upper()
+    if "SEV" in h_str: return 3
+    if "MOD-SEV" in h_str: return 2.5
+    if "MOD" in h_str: return 2
+    if "LGT" in h_str: return 1
+    return 0
+
+# ---------------------------------------------------------
+# SPATIAL ENGINES & DATA FETCH
 # ---------------------------------------------------------
 @st.cache_data(ttl=86400)
 def get_location_name(user_lat, user_lon):
@@ -154,24 +191,17 @@ def get_nearest_icao_station(user_lat, user_lon):
         seen_icaos = set()
         
         for taf in data:
-            if 'icaoId' not in taf or 'lat' not in taf or 'lon' not in taf:
-                continue
-                
+            if 'icaoId' not in taf or 'lat' not in taf or 'lon' not in taf: continue
             icao_code = taf['icaoId']
-            if icao_code in seen_icaos:
-                continue
+            if icao_code in seen_icaos: continue
             seen_icaos.add(icao_code)
             
-            stn_lat = float(taf['lat'])
-            stn_lon = float(taf['lon'])
-            
+            stn_lat, stn_lon = float(taf['lat']), float(taf['lon'])
             R = 6371.0 
             lat1, lon1 = math.radians(user_lat), math.radians(user_lon)
             lat2, lon2 = math.radians(stn_lat), math.radians(stn_lon)
             
-            dlat = lat2 - lat1
-            dlon = lon2 - lon1
-            
+            dlat, dlon = lat2 - lat1, lon2 - lon1
             a = math.sin(dlat / 2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2)**2
             c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
             dist = R * c
@@ -181,24 +211,14 @@ def get_nearest_icao_station(user_lat, user_lon):
                 x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
                 bearing = (math.degrees(math.atan2(y, x)) + 360) % 360
                 dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-                best_station = {
-                    "icao": icao_code,
-                    "dist": dist,
-                    "dir": dirs[int(round(bearing / 45)) % 8]
-                }
+                best_station = {"icao": icao_code, "dist": dist, "dir": dirs[int(round(bearing / 45)) % 8]}
         
-        if best_station["icao"] != "NONE":
-            return best_station
-            
-    except Exception as e:
+        if best_station["icao"] != "NONE": return best_station
+    except Exception:
         pass
-    
     return {"icao": "NONE", "dist": None, "dir": ""}
 
-# ---------------------------------------------------------
-# MAIN DASHBOARD EXECUTION
-# ---------------------------------------------------------
-
+# --- SIDEBAR CONFIGURATION ---
 LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
 try:
     st.sidebar.image(LOGO_URL, use_container_width=True)
@@ -227,13 +247,7 @@ model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (C
 
 def log_refresh_callback():
     st.cache_data.clear()
-    log_action(
-        st.session_state.get("active_operator", "UNKNOWN"), 
-        st.session_state.get("lat_input", 44.1628), 
-        st.session_state.get("lon_input", -77.3832), 
-        st.session_state.get("icao_input", icao), 
-        "MANUAL_REFRESH"
-    )
+    log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "MANUAL_REFRESH")
 
 st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 
@@ -258,19 +272,22 @@ if data is None:
     st.stop()
 elif "error" in data:
     st.error(f"⚠️ CRITICAL API REJECTION: {data.get('message', 'Unknown Error')}")
-    st.markdown("**Diagnostic URL (For Dev review only):**")
-    st.code(data.get('url', 'URL Unavailable'))
     st.stop()
 elif "hourly" not in data:
     st.error("⚠️ CRITICAL: Malformed data payload received from server.")
     st.stop()
 
+# --- TIME PARSING ---
 tf = TimezoneFinder()
 tz_str = tf.timezone_at(lng=lon, lat=lat)
 local_tz = pytz.timezone(tz_str) if tz_str else timezone.utc
 tz_abbr = datetime.now(local_tz).tzname() if tz_str else "UTC"
 
 h = data["hourly"]
+is_kmh = "km/h" in data.get("hourly_units", {}).get("wind_speed_10m", "km/h").lower()
+k_conv = 0.539957 if is_kmh else 1.0
+raw_wind_unit = "KT"
+sfc_elevation = data.get('elevation', 0) * 3.28084
 
 times_display = []
 for t in h["time"]:
@@ -281,9 +298,148 @@ for t in h["time"]:
 now_utc = datetime.now(timezone.utc)
 time_diffs = [abs((datetime.fromisoformat(t).replace(tzinfo=timezone.utc) - now_utc).total_seconds()) for t in h["time"]]
 nearest_idx = time_diffs.index(min(time_diffs))
-
 max_idx = min(len(h["time"]) - 1, nearest_idx + 48)
 valid_times_display = times_display[nearest_idx : max_idx + 1]
+
+# ---------------------------------------------------------
+# NEW: 48-HOUR TEMPORAL MATRIX UI & LOGIC
+# ---------------------------------------------------------
+st.subheader("Mission Go/No-Go Temporal Matrix")
+
+with st.expander("⚙️ Configure Operational Constraints"):
+    tc1, tc2, tc3, tc4, tc5, tc6 = st.columns(6)
+    t_wind = tc1.number_input("Max Wind (KT)", value=20)
+    t_gst = tc2.number_input("Max Gust (KT)", value=25)
+    t_ceil = tc3.number_input("Min Ceiling (ft AGL)", value=500, step=100)
+    t_vis = tc4.number_input("Min Vis (SM)", value=3.0, step=0.5)
+    t_turb = tc5.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=1)
+    t_ice = tc6.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=0)
+
+# Build the Timeline Data
+timeline_html_blocks = []
+
+for i in range(nearest_idx, max_idx + 1):
+    failures = []
+    
+    # Extract Base Variables
+    w_raw = h.get('wind_speed_10m', [0])[i]
+    w_spd = (float(w_raw) if w_raw is not None else 0.0) * k_conv
+    
+    g_raw_list = h.get('wind_gusts_10m')
+    g_raw = (float(g_raw_list[i]) * k_conv) if (g_raw_list and len(g_raw_list) > i and g_raw_list[i] is not None) else w_spd
+    gst = (w_spd * 1.25) if g_raw <= w_spd else g_raw
+    
+    wx_raw = h.get('weather_code', [0])
+    wx = int(wx_raw[i]) if (wx_raw and len(wx_raw) > i and wx_raw[i] is not None) else 0
+    
+    # Extract Visibility
+    vis_raw_list = h.get('visibility')
+    if vis_raw_list and len(vis_raw_list) > i and vis_raw_list[i] is not None:
+        vis_sm = float(vis_raw_list[i]) / METERS_TO_SM
+    else:
+        rh_raw = h.get('relative_humidity_2m', [0])[i]
+        rh_v = int(rh_raw) if rh_raw is not None else 0
+        vis_sm = int((100-rh_v)/5 * 1.13) if rh_v > 0 else 10
+        
+    # Generate Profile for Cloud Base Calculation
+    t_temp_raw = h.get('temperature_2m', [0])[i]
+    t_temp = float(t_temp_raw) if t_temp_raw is not None else 0.0
+    rh_v = int(h.get('relative_humidity_2m', [0])[i]) if h.get('relative_humidity_2m', [0])[i] is not None else 0
+    td = calc_td(t_temp, rh_v)
+    sfc_spread = t_temp - td
+    
+    profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh_v}]
+    for p in [1000, 925, 850, 700, 500, 250]:
+        gh_list = h.get(f'geopotential_height_{p}hPa')
+        t_list = h.get(f'temperature_{p}hPa')
+        rh_list = h.get(f'relative_humidity_{p}hPa')
+        if gh_list and t_list and rh_list and len(gh_list) > i:
+            gh_val, t_val, rh_val = gh_list[i], t_list[i], rh_list[i]
+            if gh_val is not None and t_val is not None and rh_val is not None:
+                p_gh = float(gh_val) * 3.28084
+                if p_gh > profile[-1]['h']:
+                    profile.append({'h': p_gh, 't': float(t_val), 'td': calc_td(float(t_val), int(rh_val)), 'spread': float(t_val) - calc_td(float(t_val), int(rh_val)), 'rh': int(rh_val)})
+
+    # Calc Cloud Base
+    t_950_list = h.get('temperature_925hPa')
+    t_950 = float(t_950_list[i]) if (t_950_list and len(t_950_list) > i and t_950_list[i] is not None) else t_temp
+    is_convective = (wx >= 80) or ((t_temp - t_950) >= 7.5)
+    
+    c_base_agl = 10000
+    if is_convective:
+        c_base_agl = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
+    else:
+        search_profile = profile[1:] if len(profile) > 1 else profile
+        for layer in search_profile:
+            if layer['spread'] <= 3.0: 
+                c_base_agl = int(round(max(0, layer['h'] - sfc_elevation), -2))
+                break
+        if c_base_agl == 10000:
+            for layer in search_profile:
+                if layer['spread'] <= 5.0:
+                    c_base_agl = int(round(max(0, layer['h'] - sfc_elevation), -2))
+                    break
+
+    # Calculate Tactical Hazards at 400ft AGL
+    alt_msl = sfc_elevation + 400
+    alt_t, alt_rh = get_interp_thermals(alt_msl, profile)
+    icing_cond = calculate_icing_profile(h, i, wx)
+    
+    # Upper wind calc for 400ft shear interpolation
+    u_v_list = h.get('wind_speed_1000hPa')
+    if u_v_list and len(u_v_list) > i and u_v_list[i] is not None:
+        u_v = float(u_v_list[i]) * k_conv
+        u_h_list = h.get('geopotential_height_1000hPa')
+        u_h = float(u_h_list[i]) if (u_h_list and len(u_h_list) > i and u_h_list[i] is not None) else 110.0
+    else:
+        u_v = w_spd
+        u_h = 10.0
+        
+    s_c = w_spd + (u_v - w_spd) * (math.log(max(1, 400*0.3048)/10) / math.log(max(1.1, u_h/10)))
+    g_c = s_c + max(0, gst - w_spd)
+    
+    turb, ice = get_turb_ice(400, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
+
+    # Execute Threshold Gate Logic
+    if w_spd > t_wind: failures.append(f"Wind ({int(w_spd)}KT)")
+    if gst > t_gst: failures.append(f"Gust ({int(gst)}KT)")
+    if vis_sm < t_vis: failures.append(f"Vis ({vis_sm:.1f}SM)")
+    if c_base_agl < t_ceil: failures.append(f"Ceil ({c_base_agl}ft)")
+    if hazard_lvl(turb) > hazard_lvl(t_turb): failures.append(f"Turb ({turb})")
+    if hazard_lvl(ice) > hazard_lvl(t_ice): failures.append(f"Ice ({ice})")
+    
+    time_str = datetime.fromisoformat(h["time"][i]).replace(tzinfo=timezone.utc).astimezone(local_tz).strftime('%H:%M %Z')
+    
+    if len(failures) == 0:
+        color = "#2abf2a"  # Green
+        tooltip = f"{time_str} | FLIGHT AUTHORIZED"
+    else:
+        color = "#ff4b4b"  # Red
+        tooltip = f"{time_str} | HALT: " + ", ".join(failures)
+        
+    border_right = "border-right: 1px solid #1B1E23;" if i < max_idx else ""
+    block_html = f'<div style="flex: 1; background-color: {color}; {border_right}" title="{tooltip}"></div>'
+    timeline_html_blocks.append(block_html)
+
+# Render the flexbox UI
+ruler_html = f"""
+<div style="display: flex; width: 100%; height: 35px; border-radius: 4px; overflow: hidden; border: 1px solid #3E444E; margin-bottom: 5px;">
+    {''.join(timeline_html_blocks)}
+</div>
+<div style="display: flex; justify-content: space-between; font-size: 0.8rem; color: #A0A4AB; font-weight: bold; margin-bottom: 25px;">
+    <span>NOW</span>
+    <span>+12 HR</span>
+    <span>+24 HR</span>
+    <span>+36 HR</span>
+    <span>+48 HR</span>
+</div>
+"""
+st.markdown(ruler_html, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------
+# FORECAST DASHBOARD EXECUTION (SINGLE HOUR)
+# ---------------------------------------------------------
 
 if "forecast_slider" not in st.session_state or st.session_state.forecast_slider not in valid_times_display:
     st.session_state.forecast_slider = valid_times_display[0]
@@ -308,24 +464,6 @@ nav_col3.button("►", on_click=update_time, args=(1,), use_container_width=True
 
 st.sidebar.divider()
 
-is_kmh = "km/h" in data.get("hourly_units", {}).get("wind_speed_10m", "km/h").lower()
-k_conv = 0.539957 if is_kmh else 1.0
-raw_wind_unit = "KT"
-
-def format_dir(d, spd):
-    r = int(round(float(d), -1)) % 360
-    if r == 0 and spd > 0: return 360
-    if spd == 0: return 0
-    return r
-
-def calc_td(t, rh):
-    """Calculates dewpoint from temperature and relative humidity."""
-    if rh <= 0: return t
-    a = 17.625
-    b = 243.04
-    alpha = math.log(rh / 100.0) + ((a * t) / (b + t))
-    return (b * alpha) / (a - alpha)
-
 t_temp_raw = h.get('temperature_2m', [0])[idx]
 t_temp = float(t_temp_raw) if t_temp_raw is not None else 0.0
 
@@ -348,78 +486,42 @@ vis_raw_list = h.get('visibility')
 if vis_raw_list and len(vis_raw_list) > idx and vis_raw_list[idx] is not None:
     vis_m = float(vis_raw_list[idx])
     vis_sm = vis_m / METERS_TO_SM
-    if vis_sm > 7:
-        vis_disp = "> 7 SM"
-    else:
-        vis_disp = f"{vis_sm:.1f} SM"
+    if vis_sm > 7: vis_disp = "> 7 SM"
+    else: vis_disp = f"{vis_sm:.1f} SM"
 else:
     if t_temp_raw is not None and rh_raw is not None and rh > 0:
         vis_est = int((100-rh)/5 * 1.13)
-        if vis_est > 7:
-            vis_disp = "> 7 SM"
-        else:
-            vis_disp = f"{vis_est} SM"
-    else:
-        vis_disp = "NIL"
+        if vis_est > 7: vis_disp = "> 7 SM"
+        else: vis_disp = f"{vis_est} SM"
+    else: vis_disp = "NIL"
 
-sfc_elevation = data.get('elevation', 0) * 3.28084
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
-
 for p in [1000, 925, 850, 700, 500, 250]:
     gh_list = h.get(f'geopotential_height_{p}hPa')
     t_list = h.get(f'temperature_{p}hPa')
     rh_list = h.get(f'relative_humidity_{p}hPa')
-    
-    if gh_list and t_list and rh_list and len(gh_list) > idx and len(t_list) > idx and len(rh_list) > idx:
+    if gh_list and t_list and rh_list and len(gh_list) > idx:
         if gh_list[idx] is not None and t_list[idx] is not None and rh_list[idx] is not None:
             p_gh = float(gh_list[idx]) * 3.28084
             p_t = float(t_list[idx])
             p_rh = int(rh_list[idx])
             p_td = calc_td(p_t, p_rh)
-            
             if p_gh > thermal_profile[-1]['h']:
-                thermal_profile.append({
-                    'h': p_gh, 
-                    't': p_t, 
-                    'td': p_td, 
-                    'spread': p_t - p_td,
-                    'rh': p_rh
-                })
-
-def get_interp_thermals(alt_msl, profile):
-    """Interpolates exact Temp and RH for a specific altitude."""
-    if not profile: return 0.0, 0
-    if alt_msl <= profile[0]['h']: return profile[0]['t'], profile[0]['rh']
-    if alt_msl >= profile[-1]['h']: return profile[-1]['t'], profile[-1]['rh']
-    for i in range(len(profile)-1):
-        if profile[i]['h'] <= alt_msl <= profile[i+1]['h']:
-            lower = profile[i]
-            upper = profile[i+1]
-            frac = (alt_msl - lower['h']) / (upper['h'] - lower['h']) if upper['h'] != lower['h'] else 0
-            i_t = lower['t'] + frac * (upper['t'] - lower['t'])
-            i_rh = lower['rh'] + frac * (upper['rh'] - lower['rh'])
-            return i_t, int(i_rh)
-    return profile[0]['t'], profile[0]['rh']
+                thermal_profile.append({'h': p_gh, 't': p_t, 'td': p_td, 'spread': p_t - p_td, 'rh': p_rh})
 
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
     frz_raw = float(frz_raw_list[idx])
     frz_disp = "SFC" if t_temp <= 0 else f"{int(round(frz_raw * 3.28, -2)):,} ft"
 else:
-    if t_temp <= 0:
-        frz_disp = "SFC"
+    if t_temp <= 0: frz_disp = "SFC"
     else:
         frz_disp = "> 10,000 ft"
         for i in range(1, len(thermal_profile)):
-            lower = thermal_profile[i-1]
-            upper = thermal_profile[i]
+            lower, upper = thermal_profile[i-1], thermal_profile[i]
             if upper['t'] <= 0:
                 t_diff = lower['t'] - upper['t']
-                if t_diff > 0:
-                    ratio = lower['t'] / t_diff
-                    frz_h = lower['h'] + ratio * (upper['h'] - lower['h'])
-                else:
-                    frz_h = lower['h']
+                frz_h = lower['h'] + (lower['t'] / t_diff) * (upper['h'] - lower['h']) if t_diff > 0 else lower['h']
                 frz_disp = f"{int(round(frz_h, -2)):,} ft"
                 break
 
@@ -427,34 +529,26 @@ t_950_list = h.get('temperature_925hPa')
 t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_950_list[idx] is not None) else t_temp
 
 lapse_rate_temp_drop = t_temp - t_950
-is_steep_lapse_rate = lapse_rate_temp_drop >= 7.5
-is_convective = (wx >= 80) or is_steep_lapse_rate
+is_convective = (wx >= 80) or lapse_rate_temp_drop >= 7.5
 
 c_base_agl = 10000
-
 if is_convective:
-    raw_base = max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER)
-    c_base_agl = int(round(raw_base, -2))
+    c_base_agl = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
     c_base_disp = f"{c_base_agl:,} ft CONV"
 else:
     c_base_disp = "> 10,000 ft CLR"
     c_amt = "CLR"
-    
     search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
-    
     for layer in search_profile:
-        h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 3.0: 
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
-            c_base_agl = int(round(h_agl, -2))
+            c_base_agl = int(round(max(0, layer['h'] - sfc_elevation), -2))
             c_base_disp = f"{c_base_agl:,} ft {c_amt}"
             break
-            
     if c_amt == "CLR":
         for layer in search_profile:
-            h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 5.0:
-                c_base_agl = int(round(h_agl, -2))
+                c_base_agl = int(round(max(0, layer['h'] - sfc_elevation), -2))
                 c_base_disp = f"{c_base_agl:,} ft SCT"
                 break
 
@@ -476,9 +570,7 @@ else:
         u_h_list = h.get('geopotential_height_925hPa')
         u_h = float(u_h_list[idx]) if (u_h_list and len(u_h_list) > idx and u_h_list[idx] is not None) else 760.0
     else:
-        u_v = w_spd
-        u_dir = sfc_dir
-        u_h = 10.0
+        u_v, u_dir, u_h = w_spd, sfc_dir, 10.0
     
 icing_cond = calculate_icing_profile(h, idx, wx)
 dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
@@ -490,15 +582,9 @@ moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro
 
 weather_str = get_weather_element(wx, w_spd)
 
-if int(w_spd) == 0:
-    sfc_dir_disp = "CALM"
-    sfc_spd_disp = "0"
-elif int(w_spd) <= 3:
-    sfc_dir_disp = "VRB"
-    sfc_spd_disp = "3"
-else:
-    sfc_dir_disp = f"{sfc_dir:03d}°"
-    sfc_spd_disp = str(int(w_spd))
+if int(w_spd) == 0: sfc_dir_disp, sfc_spd_disp = "CALM", "0"
+elif int(w_spd) <= 3: sfc_dir_disp, sfc_spd_disp = "VRB", "3"
+else: sfc_dir_disp, sfc_spd_disp = f"{sfc_dir:03d}°", str(int(w_spd))
 
 # --- UI RENDERING STARTS HERE ---
 
@@ -532,21 +618,11 @@ for alt in [400, 300, 200, 100]:
     
     turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
     
-    if int(s_c) == 0:
-        mat_dir, mat_spd = "CALM", "0"
-    elif int(s_c) <= 3:
-        mat_dir, mat_spd = "VRB", "3"
-    else:
-        mat_dir, mat_spd = f"{d_c:03d}°", str(int(s_c))
+    if int(s_c) == 0: mat_dir, mat_spd = "CALM", "0"
+    elif int(s_c) <= 3: mat_dir, mat_spd = "VRB", "3"
+    else: mat_dir, mat_spd = f"{d_c:03d}°", str(int(s_c))
 
-    stack_tactical.append({
-        "Alt (AGL)": f"{alt}ft", 
-        "Dir": mat_dir, 
-        f"Spd ({raw_wind_unit})": mat_spd, 
-        f"Gust ({raw_wind_unit})": str(int(g_c)), 
-        "Turbulence": turb, 
-        "Icing": ice
-    })
+    stack_tactical.append({"Alt (AGL)": f"{alt}ft", "Dir": mat_dir, f"Spd ({raw_wind_unit})": mat_spd, f"Gust ({raw_wind_unit})": str(int(g_c)), "Turbulence": turb, "Icing": ice})
 
 df_tactical = pd.DataFrame(stack_tactical).set_index("Alt (AGL)")
 st.table(df_tactical)
@@ -556,35 +632,18 @@ p_levels_traj = [1000, 925, 850, 700]
 
 p_profile = []
 for p in p_levels_traj:
-    ws_list = h.get(f'wind_speed_{p}hPa')
-    wd_list = h.get(f'wind_direction_{p}hPa')
-    gh_list = h.get(f'geopotential_height_{p}hPa')
-    
+    ws_list, wd_list, gh_list = h.get(f'wind_speed_{p}hPa'), h.get(f'wind_direction_{p}hPa'), h.get(f'geopotential_height_{p}hPa')
     if ws_list and wd_list and gh_list and len(ws_list) > idx:
-        ws = ws_list[idx]
-        wd = wd_list[idx]
-        gh = gh_list[idx]
-        
+        ws, wd, gh = ws_list[idx], wd_list[idx], gh_list[idx]
         if ws is not None and wd is not None and gh is not None:
-            p_profile.append({
-                'h': float(gh) * 3.28,
-                's': float(ws) * k_conv,
-                'd': int(wd)
-            })
+            p_profile.append({'h': float(gh) * 3.28, 's': float(ws) * k_conv, 'd': int(wd)})
 
 p_profile = sorted(p_profile, key=lambda x: x['h'])
 stack_ext = []
 
 if not p_profile:
     for alt in [5000, 4000, 3000, 2000, 1000]:
-        stack_ext.append({
-            "Alt (AGL)": f"{alt}ft", 
-            "Dir": "N/A", 
-            f"Spd ({raw_wind_unit})": "N/A", 
-            f"Gust ({raw_wind_unit})": "N/A",
-            "Turbulence": "N/A", 
-            "Icing": "N/A"
-        })
+        stack_ext.append({"Alt (AGL)": f"{alt}ft", "Dir": "N/A", f"Spd ({raw_wind_unit})": "N/A", f"Gust ({raw_wind_unit})": "N/A", "Turbulence": "N/A", "Icing": "N/A"})
 else:
     for alt in [5000, 4000, 3000, 2000, 1000]:
         pts = [{'h': u_h*3.28, 's': u_v, 'd': u_dir}] + p_profile
@@ -595,32 +654,19 @@ else:
         
         frac = (alt - blw['h']) / (abv['h'] - blw['h']) if abv['h'] != blw['h'] else 0
         s_e = blw['s'] + frac * (abv['s'] - blw['s'])
-        
         d_e_raw = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
         d_e = format_dir(d_e_raw, s_e)
-        
         g_e = s_e + gust_delta
         
         alt_msl = sfc_elevation + alt
         alt_t, alt_rh = get_interp_thermals(alt_msl, thermal_profile)
-        
         turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
         
-        if int(s_e) == 0:
-            mat_dir_ext, mat_spd_ext = "CALM", "0"
-        elif int(s_e) <= 3:
-            mat_dir_ext, mat_spd_ext = "VRB", "3"
-        else:
-            mat_dir_ext, mat_spd_ext = f"{d_e:03d}°", str(int(s_e))
+        if int(s_e) == 0: mat_dir_ext, mat_spd_ext = "CALM", "0"
+        elif int(s_e) <= 3: mat_dir_ext, mat_spd_ext = "VRB", "3"
+        else: mat_dir_ext, mat_spd_ext = f"{d_e:03d}°", str(int(s_e))
 
-        stack_ext.append({
-            "Alt (AGL)": f"{alt}ft", 
-            "Dir": mat_dir_ext, 
-            f"Spd ({raw_wind_unit})": mat_spd_ext, 
-            f"Gust ({raw_wind_unit})": str(int(g_e)),
-            "Turbulence": turb, 
-            "Icing": ice
-        })
+        stack_ext.append({"Alt (AGL)": f"{alt}ft", "Dir": mat_dir_ext, f"Spd ({raw_wind_unit})": mat_spd_ext, f"Gust ({raw_wind_unit})": str(int(g_e)), "Turbulence": turb, "Icing": ice})
 
 df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
 st.table(df_ext)
@@ -671,7 +717,6 @@ if icao == "NONE":
     clean_taf = "NIL"
 else:
     clean_metar = re.sub('<[^<]+>', '', metar_raw)
-    
     raw_taf_no_html = re.sub('<[^<]+>', '', taf_raw)
     taf_lines = [line.strip() for line in raw_taf_no_html.split('\n') if line.strip()]
     
@@ -741,13 +786,7 @@ csv_header = (
 csv_data = (csv_header + df_export.to_csv()).encode('utf-8')
 
 def log_download_callback():
-    log_action(
-        st.session_state.get("active_operator", "UNKNOWN"), 
-        st.session_state.get("lat_input", 44.1628), 
-        st.session_state.get("lon_input", -77.3832), 
-        st.session_state.get("icao_input", icao), 
-        "DOWNLOAD_CSV"
-    )
+    log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "DOWNLOAD_CSV")
 
 st.download_button(
     label="Download Actuals and Forecast data (CSV)",
@@ -759,13 +798,11 @@ st.download_button(
 
 st.divider()
 st.subheader("Vertical Atmospheric Profile (Convective Ops)")
-sfc_h = data.get('elevation', 0) * 3.28084
-fig = plot_convective_profile(h, idx, t_temp, td, w_spd, sfc_dir, sfc_h)
+fig = plot_convective_profile(h, idx, t_temp, td, w_spd, sfc_dir, sfc_elevation)
 
 if fig: st.pyplot(fig)
 else: st.warning("Insufficient atmospheric layers available to render vertical profile.")
 
-# 7. LIABILITY & TRACKING ARMOR
 st.divider()
 st.markdown("""
 <div style="text-align: center; color: #8E949E; font-size: 0.85rem; padding: 20px;">
