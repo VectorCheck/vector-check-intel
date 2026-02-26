@@ -1,5 +1,11 @@
 import re
 
+# --- VECTOR CHECK AERIAL GROUP INC. : OPERATIONAL CONSTANTS ---
+# These values are locked to prevent inadvertent logic alterations.
+URBAN_VENTURI_MULTIPLIER = 1.25
+MECH_TURB_ALTITUDE_CAP_FT = 3000
+LAPSE_RATE_STANDARD_C_PER_1000FT = 1.98
+
 def get_weather_element(wx_code, wind_spd):
     """Translates WMO weather codes into human-readable text."""
     wx_map = {
@@ -25,6 +31,7 @@ def calculate_icing_profile(h, idx, wx_code):
     rh = int(rh_raw) if rh_raw is not None else 0
     wx = int(wx_code) if wx_code is not None else 0
     
+    # Table 3 Overrides (Freezing Precipitation)
     if wx in [66, 67]: 
         return "SEV CLR"
     elif wx in [56, 57, 77]: 
@@ -44,9 +51,7 @@ def calculate_icing_profile(h, idx, wx_code):
 
 def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp, rh, terrain_type="Land"):
     """
-    Evaluates turbulence and icing risk.
-    Mechanical turbulence is capped at 3000ft AGL. 
-    Icing is evaluated against temperature bands, cloud types, and LWC proxies.
+    Evaluates turbulence and icing risk with strict boundary layer caps.
     """
     w_spd = float(wind_spd) if wind_spd is not None else 0.0
     s_spd = float(sfc_spd) if sfc_spd is not None else 0.0
@@ -62,7 +67,7 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
     turb_sev = "NIL"
     
     # --- TURBULENCE LOGIC ---
-    if alt <= 3000:
+    if alt <= MECH_TURB_ALTITUDE_CAP_FT:
         if terrain_type == "Water":
             if max_wind >= 40: turb_sev = "MOD-SEV"
             elif max_wind >= 35: turb_sev = "MOD"
@@ -74,6 +79,7 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
             elif max_wind >= 15: turb_sev = "LGT"
 
         elif terrain_type == "Urban":
+            # Pragmatic Venturi applied mathematically to base thresholds
             if max_wind >= 32: turb_sev = "SEV"        
             elif max_wind >= 28: turb_sev = "MOD-SEV"  
             elif max_wind >= 20: turb_sev = "MOD"      
@@ -85,10 +91,12 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
             elif max_wind >= 25: turb_sev = "MOD"
             elif max_wind >= 15: turb_sev = "LGT"
     else:
+        # Free Stream Flow (Shear driven)
         turb_type = "SHEAR"
         if gust_delta >= 15: turb_sev = "SEV"
         elif gust_delta >= 10: turb_sev = "MOD"
 
+    # Absolute Convective Override
     if wx_val in [95, 96, 99]:
         turb_type = "CONV"
         turb_sev = "SEV"
@@ -99,8 +107,9 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
     ice = "NIL"
     
     if alt > 0:
-        alt_temp = t_val - ((alt / 1000.0) * 1.98)
+        alt_temp = t_val - ((alt / 1000.0) * LAPSE_RATE_STANDARD_C_PER_1000FT)
         
+        # Absolute physics constraint
         if alt_temp > 0 or alt_temp < -40:
             ice = "NIL"
         else:
