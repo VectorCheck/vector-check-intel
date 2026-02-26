@@ -30,7 +30,10 @@ def calculate_icing_profile(h, idx, wx_code):
     rh = int(rh_raw) if rh_raw is not None else 0
     wx = int(wx_code) if wx_code is not None else 0
     
-    if wx in [66, 67]: 
+    liquid_wx_codes = [45, 48, 51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 77, 80, 81, 82]
+    snow_wx_codes = [71, 73, 75, 85, 86]
+    
+    if wx in [66, 67, 95, 96, 99]: 
         return "SEV CLR"
     elif wx in [56, 57, 77]: 
         return "MOD MX"
@@ -38,11 +41,13 @@ def calculate_icing_profile(h, idx, wx_code):
         return "MOD RIME"
     
     if t <= 0:
-        if wx >= 50:
+        is_wet_snow = (wx in snow_wx_codes) and (0 >= t >= -3.0)
+        
+        if (wx in liquid_wx_codes) or is_wet_snow:
             return "MOD MX"
-        elif rh >= 90:
+        elif rh >= 90 and (wx not in snow_wx_codes):
             return "MOD RIME"
-        elif rh >= 80:
+        elif rh >= 80 and (wx not in snow_wx_codes):
             return "LGT RIME"
             
     return "NIL"
@@ -50,8 +55,8 @@ def calculate_icing_profile(h, idx, wx_code):
 def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_convective, icing_cond, alt_temp, alt_rh, terrain_type="Land", cloud_base_agl=10000):
     """
     Evaluates turbulence and icing risk. 
-    Strict Visible Moisture Gate enforced: Icing cannot occur in clear air below cloud base 
-    unless precipitation or fog is present.
+    Strict Visible Moisture Gate enforced: Separates Dry Snow from Wet Snow/Liquid Precip 
+    to prevent false-positive structural icing below cloud decks.
     """
     w_spd = float(wind_spd) if wind_spd is not None else 0.0
     s_spd = float(sfc_spd) if sfc_spd is not None else 0.0
@@ -108,45 +113,40 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_convective, icing_cond, al
             ice = "NIL"
         else:
             in_cloud = alt >= cloud_base_agl
-            has_precip_or_fog = wx_val >= 45
             
-            # If we are below the cloud deck and there is no precip/fog, structural icing is physically impossible.
-            if not (in_cloud or has_precip_or_fog):
+            liquid_wx_codes = [45, 48, 51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 77, 80, 81, 82]
+            snow_wx_codes = [71, 73, 75, 85, 86]
+            
+            has_liquid_precip = wx_val in liquid_wx_codes
+            # Wet Snow physically sticks to airframes (Temp between 0 and -3C)
+            is_wet_snow = (wx_val in snow_wx_codes) and (0 >= t_val >= -3.0)
+            
+            # If we are below the cloud deck and encountering dry snow (or nothing), icing is physically impossible.
+            if not (in_cloud or has_liquid_precip or is_wet_snow):
                 ice = "NIL"
             else:
-                # 1. Precipitation overrules RH
-                if wx_val in [66, 67]: 
-                    ice = "SEV CLR"
-                elif wx_val in [95, 96, 99]: 
+                if wx_val in [66, 67, 95, 96, 99]: 
                     ice = "SEV CLR"
                 elif wx_val in [56, 57, 77]: 
                     ice = "MOD MX"
-                elif wx_val in [80, 81, 82, 85, 86]: 
+                elif has_liquid_precip or is_wet_snow:
                     ice = "MOD MX"
                 elif wx_val == 48 and alt <= 1000:
                     ice = "MOD RIME" # Freezing fog impact layer
-                # 2. Stratiform visible moisture (In cloud)
                 elif rh_val >= 80: 
                     if 0 >= t_val >= -15:
-                        if rh_val >= 90:
-                            ice = "MOD RIME" 
-                        else:
-                            ice = "LGT RIME"
+                        ice = "MOD RIME" if rh_val >= 90 else "LGT RIME"
                     elif -15 > t_val >= -20:
                         ice = "LGT RIME"
                     elif t_val < -20:
-                        if rh_val >= 95:
-                            ice = "LGT RIME"
-                        else:
-                            ice = "NIL"
+                        ice = "LGT RIME" if rh_val >= 95 else "NIL"
             
     return turb, ice
 
 def apply_tactical_highlights(text):
     """
     Applies HTML highlighting to METAR/TAF.
-    Strict Audit Rule: Evaluates each line and applies a single color 
-    based on the lowest flight category present in that line.
+    Strict Audit Rule: Evaluates each line and applies a single color.
     """
     if not text or text == "NIL" or text == "UNAVAILABLE":
         return text
