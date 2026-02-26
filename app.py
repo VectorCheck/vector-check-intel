@@ -16,6 +16,10 @@ from modules.telemetry import log_action
 from modules.astronomy import get_astronomical_data
 from modules.space_weather import get_kp_index
 
+# --- CONSTANTS ---
+CONVECTIVE_CCL_MULTIPLIER = 400
+METERS_TO_SM = 1609.34
+
 # 1. PAGE CONFIG & CSS
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
 st.markdown("""
@@ -301,17 +305,17 @@ sfc_spread = t_temp - td
 sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
 sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
-# --- NATIVE VISIBILITY EXTRACTION & CAPPING (No Brackets/Tags) ---
+# --- NATIVE VISIBILITY EXTRACTION & CAPPING (Strict Formatting) ---
 vis_raw_list = h.get('visibility')
 if vis_raw_list and len(vis_raw_list) > idx and vis_raw_list[idx] is not None:
     vis_m = float(vis_raw_list[idx])
-    vis_sm = vis_m / 1609.34 # Convert meters to Statute Miles
+    vis_sm = vis_m / METERS_TO_SM
     if vis_sm > 7:
         vis_disp = "> 7 SM"
     else:
         vis_disp = f"{vis_sm:.1f} SM"
 else:
-    # Fallback to RH estimator if API payload drops visibility (Clean format)
+    # Fallback to RH estimator if API payload drops native visibility
     if t_temp_raw is not None and rh_raw is not None and rh > 0:
         vis_est = int((100-rh)/5 * 1.13)
         if vis_est > 7:
@@ -345,7 +349,7 @@ for p in [1000, 925, 850, 700]:
                     'spread': p_t - p_td
                 })
 
-# --- PRECISE FREEZING LEVEL DETERMINATION (No Brackets) ---
+# --- PRECISE FREEZING LEVEL DETERMINATION ---
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
     frz_raw = float(frz_raw_list[idx])
@@ -372,32 +376,34 @@ else:
 t_950_list = h.get('temperature_925hPa')
 t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_950_list[idx] is not None) else t_temp
 
-# Fix: Only flag as explicitly convective if weather codes dictate it, or 
-# if the lapse rate is steep/unstable (> 3C per 1000ft). 925hPa is approx 2500ft AGL.
+# Environmental Lapse Rate Check (Trigger Convective calculation if highly unstable)
 lapse_rate_temp_drop = t_temp - t_950
 is_steep_lapse_rate = lapse_rate_temp_drop >= 7.5
 is_convective = (wx >= 80) or is_steep_lapse_rate
 
 if is_convective:
     # Rule of thumb for unstable boundary layer
-    raw_base = max(0, sfc_spread * 400)
+    raw_base = max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER)
     c_base_disp = f"{int(round(raw_base, -2)):,} ft CONV"
 else:
-    # NWP Tephigram analysis for stable layers (Table rules applied strictly)
+    # NWP Tephigram analysis for stable layers (Strict SOP Compliance)
     c_base_disp = "> 10,000 ft CLR"
     c_amt = "CLR"
     
-    # 1. Search for a solid ceiling (OVC/BKN)
-    for layer in thermal_profile:
+    # 1. Skip surface layer [0] to prevent Fog from being classified as a 0ft ceiling.
+    search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
+    
+    # 2. Search for a solid ceiling (OVC/BKN) aloft
+    for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 3.0: 
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
             c_base_disp = f"{int(round(h_agl, -2)):,} ft {c_amt}"
             break
             
-    # 2. If no ceiling found, search for scattered layers
+    # 3. If no ceiling found, search for scattered layers
     if c_amt == "CLR":
-        for layer in thermal_profile:
+        for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 5.0:
                 c_base_disp = f"{int(round(h_agl, -2)):,} ft SCT"
