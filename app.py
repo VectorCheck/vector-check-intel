@@ -4,7 +4,7 @@ import math
 import re
 import json
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from timezonefinder import TimezoneFinder
 import pytz
 import plotly.graph_objects as go
@@ -28,7 +28,8 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 1.2rem !important; color: #E58E26 !important; }
     [data-testid="stMetricLabel"] { font-size: 0.8rem !important; color: #A0A4AB !important; text-transform: uppercase; }
     .ifr-text { color: #ff4b4b; font-weight: bold; }
-    .mvfr-text { color: #f6ec15; font-weight: bold; }
+    /* Tactical Override: Strip MVFR colors so only IFR stands out */
+    .mvfr-text { color: inherit !important; font-weight: inherit !important; }
     .fz-warn { background-color: #ff4b4b; color: white; padding: 2px; border-radius: 3px; font-weight: bold; }
     table { margin-left: auto; margin-right: auto; text-align: center !important; width: 90%; border-collapse: collapse; background-color: #1B1E23; }
     th { text-align: center !important; color: #8E949E !important; font-weight: bold !important; padding: 10px !important; border-bottom: 2px solid #3E444E !important; text-transform: uppercase; }
@@ -40,7 +41,6 @@ st.markdown("""
 
 # 2. ZERO-COST AUTHENTICATION & LEGAL GATEWAY
 def check_password():
-    """Returns True if the user is authenticated and has accepted the End User License Agreement."""
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
     if "eula_accepted" not in st.session_state:
@@ -113,7 +113,7 @@ if not check_password():
     st.stop()
 
 # ---------------------------------------------------------
-# HELPER FUNCTIONS (Elevated for Global Use)
+# HELPER FUNCTIONS 
 # ---------------------------------------------------------
 def calc_td(t, rh):
     if rh <= 0: return t
@@ -143,7 +143,6 @@ def format_dir(d, spd):
     return r
 
 def hazard_lvl(h_str):
-    """Translates text hazard strings into comparable numeric severities."""
     h_str = h_str.upper()
     if "SEV" in h_str: return 3
     if "MOD-SEV" in h_str: return 2.5
@@ -152,10 +151,6 @@ def hazard_lvl(h_str):
     return 0
 
 def calc_tactical_visibility(vis_raw_m, rh, w_spd, wx):
-    """
-    Translates and filters visibility to prevent NWP parametric hallucinations.
-    Applies synoptic Met Tech logic to override false low-visibility drops.
-    """
     if vis_raw_m is not None:
         vis_sm = float(vis_raw_m) / 1609.34
     else:
@@ -164,22 +159,10 @@ def calc_tactical_visibility(vis_raw_m, rh, w_spd, wx):
         elif rh >= 80: vis_sm = 5.0
         else: vis_sm = 10.0
         
-    # 1. Trust active precipitation (Rain/Snow/Drizzle/T-Storms)
-    if wx >= 50:
-        return vis_sm
-        
-    # 2. Wind Mixing Override (Radiation fog blows away > 10kts)
-    if vis_sm < 3.0 and w_spd >= 10.0 and wx not in [45, 48]:
-        return max(vis_sm, 6.0)
-        
-    # 3. Dry Air Override (Mist/Haze requires high RH)
-    if vis_sm < 4.0 and rh < 85:
-        return max(vis_sm, 7.0)
-        
-    # 4. The "Humid but Clear" Override (Overrides parametric drops)
-    if vis_sm < 3.0 and wx <= 3 and rh < 95:
-        return max(vis_sm, 4.0)
-        
+    if wx >= 50: return vis_sm
+    if vis_sm < 3.0 and w_spd >= 10.0 and wx not in [45, 48]: return max(vis_sm, 6.0)
+    if vis_sm < 4.0 and rh < 85: return max(vis_sm, 7.0)
+    if vis_sm < 3.0 and wx <= 3 and rh < 95: return max(vis_sm, 4.0)
     return vis_sm
 
 # ---------------------------------------------------------
@@ -199,21 +182,15 @@ def get_location_name(user_lat, user_lon):
         
         if region != 'Unknown Region' and province != 'Unknown':
             return f"{region}, {province}"
-        elif province != 'Unknown':
-            return province
-        else:
-            return "Unknown Location"
-    except Exception:
-        return "Location Data Unavailable"
+        elif province != 'Unknown': return province
+        else: return "Unknown Location"
+    except Exception: return "Location Data Unavailable"
 
 @st.cache_data(ttl=3600)
 def get_nearest_icao_station(user_lat, user_lon):
     try:
-        min_lat = user_lat - 1.0
-        max_lat = user_lat + 1.0
-        min_lon = user_lon - 1.0
-        max_lon = user_lon + 1.0
-        
+        min_lat, max_lat = user_lat - 1.0, user_lat + 1.0
+        min_lon, max_lon = user_lon - 1.0, user_lon + 1.0
         url = f"https://aviationweather.gov/api/data/taf?bbox={min_lat},{min_lon},{max_lat},{max_lon}&format=json"
         req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -246,8 +223,7 @@ def get_nearest_icao_station(user_lat, user_lon):
                 best_station = {"icao": icao_code, "dist": dist, "dir": dirs[int(round(bearing / 45)) % 8]}
         
         if best_station["icao"] != "NONE": return best_station
-    except Exception:
-        pass
+    except Exception: pass
     return {"icao": "NONE", "dist": None, "dir": ""}
 
 @st.cache_data(ttl=900)
@@ -300,8 +276,7 @@ def log_refresh_callback():
     st.cache_data.clear()
     try:
         log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "MANUAL_REFRESH")
-    except Exception:
-        pass 
+    except Exception: pass 
 
 st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 
@@ -355,6 +330,10 @@ nearest_idx = time_diffs.index(min(time_diffs))
 max_idx = min(len(h["time"]) - 1, nearest_idx + 48)
 valid_times_display = times_display[nearest_idx : max_idx + 1]
 
+# Setup Session State for Slider logic
+if "forecast_slider" not in st.session_state or st.session_state.forecast_slider not in valid_times_display:
+    st.session_state.forecast_slider = valid_times_display[0]
+
 # ---------------------------------------------------------
 # INTERACTIVE IMPACT MATRIX UI & LOGIC
 # ---------------------------------------------------------
@@ -368,7 +347,6 @@ with st.expander("Configure Operational Constraints"):
     t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=1)
     t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=0)
 
-# Build the Timeline Data for Plotly
 x_labels = []      
 hover_texts = []   
 color_vals = []    
@@ -378,11 +356,9 @@ for i in range(nearest_idx, max_idx + 1):
     
     w_raw = h.get('wind_speed_10m', [0])[i]
     w_spd = (float(w_raw) if w_raw is not None else 0.0) * k_conv
-    
     g_raw_list = h.get('wind_gusts_10m')
     g_raw = (float(g_raw_list[i]) * k_conv) if (g_raw_list and len(g_raw_list) > i and g_raw_list[i] is not None) else w_spd
     gst = (w_spd * 1.25) if g_raw <= w_spd else g_raw
-    
     wx_raw = h.get('weather_code', [0])
     wx = int(wx_raw[i]) if (wx_raw and len(wx_raw) > i and wx_raw[i] is not None) else 0
     
@@ -392,7 +368,6 @@ for i in range(nearest_idx, max_idx + 1):
     td = calc_td(t_temp, rh_v)
     sfc_spread = t_temp - td
     
-    # Process Visibility using Tactical Override
     vis_raw_list = h.get('visibility')
     vis_raw_val = vis_raw_list[i] if vis_raw_list and len(vis_raw_list) > i else None
     vis_sm = calc_tactical_visibility(vis_raw_val, rh_v, w_spd, wx)
@@ -449,8 +424,7 @@ for i in range(nearest_idx, max_idx + 1):
         u_h_list = h.get('geopotential_height_1000hPa')
         u_h = float(u_h_list[i]) if (u_h_list and len(u_h_list) > i and u_h_list[i] is not None) else 110.0
     else:
-        u_v = w_spd
-        u_h = 10.0
+        u_v, u_h = w_spd, 10.0
         
     s_c = w_spd + (u_v - w_spd) * (math.log(max(1, 400*0.3048)/10) / math.log(max(1.1, u_h/10)))
     g_c = s_c + max(0, gst - w_spd)
@@ -480,12 +454,20 @@ tick_vals = x_labels[::4]
 tick_texts = []
 last_date_str = None
 
+# Smart Date Engine for X-Axis
+today_date = datetime.now(local_tz).date()
+tomorrow_date = today_date + timedelta(days=1)
+
 for val in tick_vals:
     idx_for_val = nearest_idx + x_labels.index(val)
     dt_local = datetime.fromisoformat(h["time"][idx_for_val]).replace(tzinfo=timezone.utc).astimezone(local_tz)
     
     t_str = dt_local.strftime('%H:%M')
-    d_str = dt_local.strftime('%b %d')
+    tick_date = dt_local.date()
+    
+    if tick_date == today_date: d_str = "Today"
+    elif tick_date == tomorrow_date: d_str = "Tomorrow"
+    else: d_str = dt_local.strftime('%b %d')
     
     if last_date_str is None or d_str != last_date_str:
         tick_texts.append(f"{t_str}<br><b>{d_str}</b>")
@@ -502,8 +484,25 @@ fig = go.Figure(data=go.Bar(
     width=1 
 ))
 
+# Indicator Logic (Find the exact x-coordinate for the slider hour)
+current_selected = st.session_state.forecast_slider
+try:
+    selected_idx = valid_times_display.index(current_selected)
+    selected_x_label = x_labels[selected_idx]
+except ValueError:
+    selected_x_label = x_labels[0]
+
+# Add the sleek horizontal marker underneath the selected hour block
+fig.add_trace(go.Scatter(
+    x=[selected_x_label],
+    y=[-0.15],
+    mode="markers",
+    marker=dict(symbol="line-ew", color="#E58E26", size=14, line=dict(width=4, color="#E58E26")),
+    hoverinfo="skip"
+))
+
 fig.update_layout(
-    height=55, 
+    height=65, 
     margin=dict(l=0, r=0, t=0, b=25),
     plot_bgcolor="#1B1E23",
     paper_bgcolor="#1B1E23",
@@ -517,7 +516,7 @@ fig.update_layout(
         zeroline=False,
         fixedrange=True
     ),
-    yaxis=dict(showticklabels=False, showgrid=False, zeroline=False, range=[0, 1], fixedrange=True),
+    yaxis=dict(showticklabels=False, showgrid=False, zeroline=False, range=[-0.25, 1], fixedrange=True),
     dragmode=False,
     showlegend=False
 )
@@ -541,9 +540,6 @@ st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
 # ---------------------------------------------------------
 # FORECAST DASHBOARD EXECUTION (SINGLE HOUR)
 # ---------------------------------------------------------
-
-if "forecast_slider" not in st.session_state or st.session_state.forecast_slider not in valid_times_display:
-    st.session_state.forecast_slider = valid_times_display[0]
 
 def update_time(offset):
     current_val = st.session_state.forecast_slider
@@ -822,14 +818,17 @@ if icao == "NONE":
     clean_taf = "NIL"
 else:
     clean_metar = re.sub('<[^<]+>', '', metar_raw)
+    
+    # 1. TAF Split Logic: Strip HTML and split RMK to its own explicitly recognized line
     raw_taf_no_html = re.sub('<[^<]+>', '', taf_raw)
+    raw_taf_no_html = raw_taf_no_html.replace(" RMK ", "\nRMK ")
     taf_lines = [line.strip() for line in raw_taf_no_html.split('\n') if line.strip()]
     
     ui_taf_lines = []
     csv_taf_lines = []
     
     for i, line in enumerate(taf_lines):
-        if i == 0 or i == len(taf_lines) - 1 or line.startswith("FM"):
+        if i == 0 or i == len(taf_lines) - 1 or line.startswith("FM") or line.startswith("RMK"):
             ui_taf_lines.append(line)
             csv_taf_lines.append(line)
         else:
