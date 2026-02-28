@@ -37,8 +37,8 @@ def plot_convective_profile(h, idx, t_temp, td, w_spd, sfc_dir, sfc_elevation):
     if len(alts) < 3: 
         return None
     
-    # 2. Setup Plot
-    fig, ax = plt.subplots(figsize=(8, 10), facecolor='#1B1E23')
+    # 2. Setup Plot - ADJUSTED: Reduced size by 10% (8->7.2, 10->9)
+    fig, ax = plt.subplots(figsize=(7.2, 9.0), facecolor='#1B1E23')
     ax.set_facecolor('#1B1E23')
     
     # Custom Skew Transformation (+1 degree shift per 1000 ft)
@@ -82,10 +82,14 @@ def plot_convective_profile(h, idx, t_temp, td, w_spd, sfc_dir, sfc_elevation):
     ax.plot(sk_dewpts, alts, color='#2abf2a', linewidth=2.5, zorder=4, label='Dewpoint')
     ax.plot(sk_temps, alts, color='#ff4b4b', linewidth=2.5, zorder=4, label='Temperature')
     
-    # Formating
-    ax.set_ylim(0, 35000)
+    # Formatting
+    # ADJUSTED: Limit y-axis to 30,000 ft (Maximizes resolution in core zone)
+    ax.set_ylim(0, 30000)
     ax.set_xlim(-40, 60)
-    ax.set_title("Tactical Skew-T (Dry/Moist Adiabats & Saturation Shading)", color="#D1D5DB", pad=20, fontsize=12, fontweight='bold')
+    
+    # ADJUSTED: Removed internal title to save space (Handle via st.subheader in app.py)
+    # ax.set_title("Tactical Skew-T (Dry/Moist Adiabats & Saturation Shading)", color="#D1D5DB", pad=20, fontsize=12, fontweight='bold')
+    
     ax.tick_params(axis='y', colors='#8E949E')
     ax.tick_params(axis='x', colors='#8E949E')
     ax.spines['top'].set_visible(False)
