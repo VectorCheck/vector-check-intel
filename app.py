@@ -32,7 +32,6 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 1.2rem !important; color: #E58E26 !important; }
     [data-testid="stMetricLabel"] { font-size: 0.8rem !important; color: #A0A4AB !important; text-transform: uppercase; }
     .ifr-text { color: #ff4b4b; font-weight: bold; }
-    /* Tactical Override: Strip MVFR colors so only IFR stands out */
     .mvfr-text { color: inherit !important; font-weight: inherit !important; }
     .fz-warn { background-color: #ff4b4b; color: white; padding: 2px; border-radius: 3px; font-weight: bold; }
     table { margin-left: auto; margin-right: auto; text-align: center !important; width: 90%; border-collapse: collapse; background-color: #1B1E23; }
@@ -187,8 +186,9 @@ def get_location_name(user_lat, user_lon):
         if region != 'Unknown Region' and province != 'Unknown':
             return f"{region}, {province}"
         elif province != 'Unknown': return province
-        else: return "Unknown Location"
-    except Exception: return "Location Data Unavailable"
+        else: return f"Coord: {user_lat:.2f}, {user_lon:.2f}"
+    except Exception: 
+        return f"Coord: {user_lat:.2f}, {user_lon:.2f}" # Commercial Fallback if Rate Limited
 
 @st.cache_data(ttl=3600)
 def get_nearest_icao_station(user_lat, user_lon):
@@ -802,6 +802,7 @@ if icao == "NONE":
     clean_taf = "NIL"
 else:
     clean_metar = re.sub('<[^<]+>', '', metar_raw)
+    
     raw_taf_no_html = re.sub('<[^<]+>', '', taf_raw)
     raw_taf_no_html = raw_taf_no_html.replace(" RMK ", "\nRMK ")
     taf_lines = [line.strip() for line in raw_taf_no_html.split('\n') if line.strip()]
@@ -849,6 +850,7 @@ def generate_pdf_report():
     pdf = FPDF()
     pdf.add_page()
     
+    # 3. UNICODE FIX: Aggressively sanitize raw aviation string inputs to prevent fpdf crashes
     def safe_txt(txt):
         return str(txt).replace('°', ' deg').encode('latin-1', 'replace').decode('latin-1')
 
@@ -928,11 +930,18 @@ def generate_pdf_report():
     draw_table("TACTICAL HAZARD STACK (0-400ft AGL)", df_tactical)
     draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)", df_ext)
     
+    # 1. DISK LEAK FIX: Safely wrap tmp file generation in try/finally to prevent orphaned files
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        pdf.output(tmp.name)
-        with open(tmp.name, "rb") as f:
+        tmp_name = tmp.name
+    
+    try:
+        pdf.output(tmp_name)
+        with open(tmp_name, "rb") as f:
             pdf_bytes = f.read()
-    os.unlink(tmp.name)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+            
     return pdf_bytes
 
 def log_download_callback():
