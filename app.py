@@ -8,6 +8,9 @@ from datetime import datetime, timezone, timedelta
 from timezonefinder import TimezoneFinder
 import pytz
 import plotly.graph_objects as go
+import tempfile
+import os
+from fpdf import FPDF
 
 # Import Vector Check Modules
 from modules.data_ingest import get_aviation_weather, fetch_mission_data
@@ -20,7 +23,6 @@ from modules.space_weather import get_kp_index
 # --- CONSTANTS ---
 CONVECTIVE_CCL_MULTIPLIER = 400
 METERS_TO_SM = 1609.34
-# Master High-Res Level Array
 ALL_P_LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150]
 
 # 1. PAGE CONFIG & CSS
@@ -349,7 +351,6 @@ with st.expander("Configure Operational Constraints"):
     t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=2)
     t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=1)
 
-# Build the Timeline Data for Plotly
 x_labels = []      
 hover_texts = []   
 color_vals = []    
@@ -375,7 +376,6 @@ for i in range(nearest_idx, max_idx + 1):
     vis_raw_val = vis_raw_list[i] if vis_raw_list and len(vis_raw_list) > i else None
     vis_sm = calc_tactical_visibility(vis_raw_val, rh_v, w_spd, wx)
     
-    # Use High-Res Arrays if available
     profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh_v}]
     for p in ALL_P_LEVELS:
         gh_list = h.get(f'geopotential_height_{p}hPa')
@@ -471,7 +471,6 @@ fig = go.Figure(data=go.Bar(
     width=1 
 ))
 
-# Indicator Logic (Find the exact x-coordinate for the slider hour)
 current_selected = st.session_state.forecast_slider
 try:
     selected_idx = valid_times_display.index(current_selected)
@@ -479,7 +478,6 @@ try:
 except ValueError:
     selected_x_label = x_labels[0]
 
-# Add the sleek horizontal marker underneath the selected hour block
 fig.add_trace(go.Scatter(
     x=[selected_x_label],
     y=[-0.15],
@@ -566,7 +564,6 @@ sfc_spread = t_temp - td
 sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
 sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
-# Process Visibility using Tactical Override for the Dashboard
 vis_raw_list = h.get('visibility')
 vis_raw_val = vis_raw_list[idx] if vis_raw_list and len(vis_raw_list) > idx else None
 vis_sm = calc_tactical_visibility(vis_raw_val, rh, w_spd, wx)
@@ -574,7 +571,6 @@ vis_sm = calc_tactical_visibility(vis_raw_val, rh, w_spd, wx)
 if vis_sm > 7: vis_disp = "> 7 SM"
 else: vis_disp = f"{vis_sm:.1f} SM"
 
-# Use High-Res Arrays if available
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
 for p in ALL_P_LEVELS:
     gh_list = h.get(f'geopotential_height_{p}hPa')
@@ -806,8 +802,6 @@ if icao == "NONE":
     clean_taf = "NIL"
 else:
     clean_metar = re.sub('<[^<]+>', '', metar_raw)
-    
-    # 1. TAF Split Logic: Strip HTML and split RMK to its own explicitly recognized line
     raw_taf_no_html = re.sub('<[^<]+>', '', taf_raw)
     raw_taf_no_html = raw_taf_no_html.replace(" RMK ", "\nRMK ")
     taf_lines = [line.strip() for line in raw_taf_no_html.split('\n') if line.strip()]
@@ -848,46 +842,110 @@ else:
 
 st.divider()
 
-df_export = pd.concat([df_tactical, df_ext])
-stn_display_str = f"{icao} | {stn_dist:.1f} km {stn_dir} of AO" if icao != "NONE" else "No METAR/TAF information within a 50km radius."
+# --- ENTERPRISE PDF EXPORT ENGINE ---
+def generate_pdf_report():
+    stn_display_str = f"{icao} | {stn_dist:.1f} km {stn_dir} of AO" if icao != "NONE" else "No valid ICAO within 50km."
+    
+    pdf = FPDF()
+    pdf.add_page()
+    
+    def safe_txt(txt):
+        return str(txt).replace('°', ' deg').encode('latin-1', 'replace').decode('latin-1')
 
-csv_header = (
-    "VECTOR CHECK AERIAL GROUP INC. - Atmospheric Risk Assessment\n"
-    f"Target Coordinates: {lat}, {lon}\n"
-    f"Regional Area: {regional_name}\n"
-    f"Automated Weather Station: {stn_display_str}\n"
-    f"Forecast Model: {model_choice} | Valid Time: {selected_time_str}\n"
-    f"Terrain Environment: {terrain_env}\n"
-    f"Wind Unit Standard: {raw_wind_unit}\n\n" 
-    "--- FORECASTED SURFACE CONDITIONS ---\n"
-    f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\n"
-    f"Wind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\n"
-    f"Weather: {weather_str}\n"
-    f"Visibility: {vis_disp}\n"
-    f"Cloud Base: {c_base_disp} | Freezing Level: {frz_disp}\n\n"
-    "--- ASTRONOMICAL & SPACE WEATHER ---\n"
-    f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
-    f"Moon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n"
-    f"Space Weather: Kp Index {space_data['kp']} | GNSS Risk: {space_data['risk']}\n"
-    f"Position: Sun {sun_pos_display} | Moon {moon_pos_display}\n\n"
-    f"--- METAR/SPECI ---\n{clean_metar}\n\n"
-    f"--- TAF ---\n{clean_taf}\n\n"
-    "--- HAZARD STACK (AGL) ---\n"
-)
+    pdf.set_font("helvetica", "B", 14)
+    pdf.cell(0, 8, "VECTOR CHECK AERIAL GROUP INC.", border=0, new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("helvetica", "I", 10)
+    pdf.cell(0, 6, "Atmospheric Risk Assessment (Operational Flight Briefing)", border=0, new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(5)
 
-csv_data = (csv_header + df_export.to_csv()).encode('utf-8')
+    pdf.set_font("helvetica", "B", 10)
+    pdf.cell(40, 6, "Target Coordinates:", border=0)
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 6, safe_txt(f"{lat}, {lon}"), border=0, new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_font("helvetica", "B", 10)
+    pdf.cell(40, 6, "Regional Area:", border=0)
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 6, safe_txt(regional_name), border=0, new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_font("helvetica", "B", 10)
+    pdf.cell(40, 6, "Reference Station:", border=0)
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 6, safe_txt(stn_display_str), border=0, new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_font("helvetica", "B", 10)
+    pdf.cell(40, 6, "Model / Valid Time:", border=0)
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 6, safe_txt(f"{model_choice} | {selected_time_str}"), border=0, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(5)
+
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(0, 8, "FORECASTED SURFACE CONDITIONS", border=0, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", "", 10)
+    pdf.multi_cell(0, 6, safe_txt(f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\nWind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\nWeather: {weather_str} | Visibility: {vis_disp}\nCloud Base: {c_base_disp} | Freezing Level: {frz_disp}"))
+    pdf.ln(5)
+
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(0, 8, "ASTRONOMICAL & SPACE WEATHER", border=0, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", "", 10)
+    pdf.multi_cell(0, 6, safe_txt(f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\nMoon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\nSpace Weather: Kp Index {space_data['kp']} | GNSS Risk: {space_data['risk']}"))
+    pdf.ln(5)
+
+    if icao != "NONE":
+        pdf.set_font("helvetica", "B", 12)
+        pdf.cell(0, 8, f"STATION ACTUALS ({icao})", border=0, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("helvetica", "B", 10)
+        pdf.cell(0, 6, "METAR:", border=0, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("helvetica", "", 9)
+        pdf.multi_cell(0, 5, safe_txt(clean_metar))
+        pdf.ln(2)
+        pdf.set_font("helvetica", "B", 10)
+        pdf.cell(0, 6, "TAF:", border=0, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("helvetica", "", 9)
+        pdf.multi_cell(0, 5, safe_txt(clean_taf))
+        pdf.ln(5)
+
+    def draw_table(title, df):
+        pdf.set_font("helvetica", "B", 12)
+        pdf.cell(0, 8, title, border=0, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("helvetica", "B", 9)
+        
+        col_names = ["Alt (AGL)"] + list(df.columns)
+        col_widths = [25, 20, 25, 25, 30, 25] 
+        
+        for i, col in enumerate(col_names):
+            pdf.cell(col_widths[i], 8, safe_txt(str(col)), border=1, align='C')
+        pdf.ln(8)
+        
+        pdf.set_font("helvetica", "", 9)
+        for idx_val, row in df.iterrows():
+            pdf.cell(col_widths[0], 8, safe_txt(str(idx_val)), border=1, align='C')
+            for i, val in enumerate(row):
+                pdf.cell(col_widths[i+1], 8, safe_txt(str(val)), border=1, align='C')
+            pdf.ln(8)
+        pdf.ln(5)
+
+    draw_table("TACTICAL HAZARD STACK (0-400ft AGL)", df_tactical)
+    draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)", df_ext)
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        pdf.output(tmp.name)
+        with open(tmp.name, "rb") as f:
+            pdf_bytes = f.read()
+    os.unlink(tmp.name)
+    return pdf_bytes
 
 def log_download_callback():
     try:
-        log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "DOWNLOAD_CSV")
+        log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "DOWNLOAD_PDF")
     except Exception:
-        pass # Silently swallow telemetry timeouts
+        pass 
 
 st.download_button(
-    label="Download Actuals and Forecast data (CSV)",
-    data=csv_data,
-    file_name=f"VCAG_Hazard_Matrix_{lat}_{lon}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-    mime="text/csv",
+    label="Download Flight Briefing (PDF)",
+    data=generate_pdf_report(),
+    file_name=f"VCAG_Briefing_{lat}_{lon}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+    mime="application/pdf",
     on_click=log_download_callback
 )
 
@@ -903,6 +961,6 @@ st.markdown("""
 <div style="text-align: center; color: #8E949E; font-size: 0.85rem; padding: 20px;">
 <strong>⚠️ FOR SITUATIONAL AWARENESS ONLY</strong><br>
 This system translates raw meteorological model data for uncrewed systems. It does not replace official NAV CANADA or NOAA flight service briefings. The Pilot in Command (PIC) retains ultimate authority and responsibility for flight safety. Vector Check Aerial Group Inc. assumes no liability for operational decisions made using this tool. <br><br>
-<em>Usage of this system, including geographic querying and CSV generation, is actively logged to a secure database for audit and security purposes.</em>
+<em>Usage of this system, including geographic querying and PDF generation, is actively logged to a secure database for audit and security purposes.</em>
 </div>
 """, unsafe_allow_html=True)
