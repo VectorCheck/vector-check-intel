@@ -188,7 +188,7 @@ def get_location_name(user_lat, user_lon):
         elif province != 'Unknown': return province
         else: return f"Coord: {user_lat:.2f}, {user_lon:.2f}"
     except Exception: 
-        return f"Coord: {user_lat:.2f}, {user_lon:.2f}" # Commercial Fallback if Rate Limited
+        return f"Coord: {user_lat:.2f}, {user_lon:.2f}" 
 
 @st.cache_data(ttl=3600)
 def get_nearest_icao_station(user_lat, user_lon):
@@ -391,7 +391,7 @@ for i in range(nearest_idx, max_idx + 1):
     t_950 = float(t_950_list[i]) if (t_950_list and len(t_950_list) > i and t_950_list[i] is not None) else t_temp
     is_convective = (wx >= 80) or ((t_temp - t_950) >= 7.5)
     
-    c_base_agl = 10000 
+    c_base_agl = 99999 
     c_amt = "CLR"
     
     if is_convective:
@@ -414,6 +414,7 @@ for i in range(nearest_idx, max_idx + 1):
                 if layer['spread'] <= 5.0:
                     if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50:
                         continue
+                    c_base_agl = int(round(h_agl, -2))
                     c_amt = "SCT" 
                     break
 
@@ -607,9 +608,9 @@ t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_95
 lapse_rate_temp_drop = t_temp - t_950
 is_convective = (wx >= 80) or lapse_rate_temp_drop >= 7.5
 
-c_base_agl = 10000
+c_base_agl = 99999
 c_amt = "CLR"
-c_base_disp = "> 10,000 ft CLR"
+c_base_disp = "CLR BLO 10,000ft"
 
 if is_convective:
     c_base_agl = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
@@ -850,7 +851,6 @@ def generate_pdf_report():
     pdf = FPDF()
     pdf.add_page()
     
-    # 3. UNICODE FIX: Aggressively sanitize raw aviation string inputs to prevent fpdf crashes
     def safe_txt(txt):
         return str(txt).replace('°', ' deg').encode('latin-1', 'replace').decode('latin-1')
 
@@ -930,7 +930,6 @@ def generate_pdf_report():
     draw_table("TACTICAL HAZARD STACK (0-400ft AGL)", df_tactical)
     draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)", df_ext)
     
-    # 1. DISK LEAK FIX: Safely wrap tmp file generation in try/finally to prevent orphaned files
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp_name = tmp.name
     
