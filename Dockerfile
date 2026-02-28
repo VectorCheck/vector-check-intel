@@ -23,5 +23,5 @@ EXPOSE 8501
 # 7. HEALTHCHECK: Tells DigitalOcean if the app crashes so it can auto-restart it
 HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
 
-# 8. SECURE IGNITION: Automatically build the secrets file from an Environment Variable, then run
-CMD sh -c "mkdir -p .streamlit && echo \"$SECRETS_TOML\" > .streamlit/secrets.toml && streamlit run app.py --server.port=8501 --server.address=0.0.0.0"
+# 8. SECURE IGNITION: Use Python to perfectly preserve vault quotes and newlines, then launch
+CMD sh -c "mkdir -p .streamlit && python -c \"import os; open('.streamlit/secrets.toml', 'w').write(os.environ.get('SECRETS_TOML', ''))\" && streamlit run app.py --server.port=8501 --server.address=0.0.0.0"
