@@ -991,7 +991,7 @@ def generate_pdf_report():
             pdf.ln(8)
         pdf.ln(5)
 
-    draw_table("TACTICAL HAZARD STACK (0-400ft AGL)", df_tactical)
+    draw_table("TACTICAL Hazard STACK (0-400ft AGL)", df_tactical)
     draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)", df_ext)
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
