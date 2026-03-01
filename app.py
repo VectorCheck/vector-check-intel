@@ -45,21 +45,25 @@ def load_prefs(user):
 
 def sanitize_prefs(prefs, user):
     """Anti-Corruption Gate: Scrubs poisoned memory states and enforces user-specific baselines."""
-    
-    # Grab the user's specific detachment base, default to Belleville if unknown ID
     base_loc = USER_DEFAULTS.get(user, {"lat": 44.1628, "lon": -77.3832})
     def_lat, def_lon = base_loc["lat"], base_loc["lon"]
     
-    lat = float(prefs.get('lat', def_lat))
-    lon = float(prefs.get('lon', def_lon))
-    wind = int(prefs.get('wind', 30))
-    ceil = int(prefs.get('ceil', 500))
-    vis = float(prefs.get('vis', 3.0))
+    try: lat = float(prefs.get('lat', def_lat))
+    except: lat = def_lat
+    try: lon = float(prefs.get('lon', def_lon))
+    except: lon = def_lon
+    try: wind = int(prefs.get('wind', 30))
+    except: wind = 30
+    try: ceil = int(prefs.get('ceil', 500))
+    except: ceil = 500
+    try: vis = float(prefs.get('vis', 3.0))
+    except: vis = 3.0
+    
     turb = str(prefs.get('turb', "MOD"))
     ice = str(prefs.get('ice', "NIL"))
     
     # Check for crash-induced zeroes
-    if lat == 0.0 and lon == 0.0:
+    if lat == 0.0 or lon == 0.0:
         lat, lon = def_lat, def_lon
     if wind == 0 and ceil == 0:
         wind, ceil, vis = 30, 500, 3.0
@@ -190,14 +194,14 @@ if not check_password():
 if "input_lat" not in st.session_state:
     current_op = st.session_state.get("active_operator", "UNKNOWN")
     raw_prefs = load_prefs(current_op)
-    lat, lon, wind, ceil, vis, turb, ice = sanitize_prefs(raw_prefs, current_op)
-    st.session_state['input_lat'] = lat
-    st.session_state['input_lon'] = lon
-    st.session_state['input_wind'] = wind
-    st.session_state['input_ceil'] = ceil
-    st.session_state['input_vis'] = vis
-    st.session_state['input_turb'] = turb
-    st.session_state['input_ice'] = ice
+    san_lat, san_lon, san_wind, san_ceil, san_vis, san_turb, san_ice = sanitize_prefs(raw_prefs, current_op)
+    st.session_state['input_lat'] = san_lat
+    st.session_state['input_lon'] = san_lon
+    st.session_state['input_wind'] = san_wind
+    st.session_state['input_ceil'] = san_ceil
+    st.session_state['input_vis'] = san_vis
+    st.session_state['input_turb'] = san_turb
+    st.session_state['input_ice'] = san_ice
 
 # ---------------------------------------------------------
 # HELPER FUNCTIONS 
@@ -342,9 +346,17 @@ except Exception:
     st.sidebar.caption("Aerial Group Inc.")
 
 st.sidebar.header("Mission Parameters")
-# Input widgets natively bound to Session State keys
-lat = st.sidebar.number_input("Latitude", format="%.4f", key="input_lat")
-lon = st.sidebar.number_input("Longitude", format="%.4f", key="input_lon")
+
+# Anti-Ghosting EXPLICIT Variable Injection
+s_lat = st.session_state.get('input_lat', 44.1628)
+s_lon = st.session_state.get('input_lon', -77.3832)
+
+lat = st.sidebar.number_input("Latitude", value=float(s_lat), format="%.4f")
+lon = st.sidebar.number_input("Longitude", value=float(s_lon), format="%.4f")
+
+# Manually push to state to ensure UI matches backend
+st.session_state['input_lat'] = lat
+st.session_state['input_lon'] = lon
 
 regional_name = get_location_name(lat, lon)
 st.sidebar.markdown(f"<div style='color: #8E949E; font-size: 0.9rem; margin-top: -10px; margin-bottom: 20px;'>{regional_name}</div>", unsafe_allow_html=True)
@@ -429,19 +441,25 @@ st.subheader("Impact Matrix")
 
 with st.expander("Configure Operational Constraints"):
     tc1, tc2, tc3, tc4, tc5 = st.columns(5)
-    # Constraints bound directly to Session State for persistence
-    t_wind = tc1.number_input("Max Wind/Gust (KT)", key="input_wind")
-    t_ceil = tc2.number_input("Min Ceiling (ft AGL)", step=100, key="input_ceil")
-    t_vis = tc3.number_input("Min Vis (SM)", step=0.5, key="input_vis")
     
-    # Secure string fallbacks for Selectboxes
-    turb_idx = ["NIL", "LGT", "MOD", "SEV"].index(st.session_state['input_turb']) if st.session_state['input_turb'] in ["NIL", "LGT", "MOD", "SEV"] else 2
-    ice_idx = ["NIL", "LGT", "MOD", "SEV"].index(st.session_state['input_ice']) if st.session_state['input_ice'] in ["NIL", "LGT", "MOD", "SEV"] else 0
+    # Anti-Ghosting Matrix Values
+    s_wind = st.session_state.get('input_wind', 30)
+    s_ceil = st.session_state.get('input_ceil', 500)
+    s_vis = st.session_state.get('input_vis', 3.0)
     
-    t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=turb_idx, key="input_turb_widget")
-    t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=ice_idx, key="input_ice_widget")
+    t_wind = tc1.number_input("Max Wind/Gust (KT)", value=int(s_wind))
+    t_ceil = tc2.number_input("Min Ceiling (ft AGL)", value=int(s_ceil), step=100)
+    t_vis = tc3.number_input("Min Vis (SM)", value=float(s_vis), step=0.5)
     
-    # Sync back the widgets to the master session state to maintain harmony
+    turb_idx = ["NIL", "LGT", "MOD", "SEV"].index(st.session_state.get('input_turb', 'MOD')) if st.session_state.get('input_turb', 'MOD') in ["NIL", "LGT", "MOD", "SEV"] else 2
+    ice_idx = ["NIL", "LGT", "MOD", "SEV"].index(st.session_state.get('input_ice', 'NIL')) if st.session_state.get('input_ice', 'NIL') in ["NIL", "LGT", "MOD", "SEV"] else 0
+    
+    t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=turb_idx)
+    t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=ice_idx)
+    
+    st.session_state['input_wind'] = t_wind
+    st.session_state['input_ceil'] = t_ceil
+    st.session_state['input_vis'] = t_vis
     st.session_state['input_turb'] = t_turb
     st.session_state['input_ice'] = t_ice
 
