@@ -511,7 +511,6 @@ for i in range(nearest_idx, max_idx + 1):
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 3.0: 
-            # Reverted Filter: Prevents forcing a 0ft OVC unless visibility is < 1.5 SM (Dense Fog)
             if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
             c_base_agl = int(round(h_agl, -2))
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
@@ -673,6 +672,7 @@ nav_col3.button("►", on_click=update_time, args=(1,), use_container_width=True
 
 st.sidebar.divider()
 
+# Core Extractions
 t_temp_raw = h.get('temperature_2m', [0])[idx]
 t_temp = float(t_temp_raw) if t_temp_raw is not None else 0.0
 
@@ -684,6 +684,20 @@ w_spd = (float(w_spd_raw) if w_spd_raw is not None else 0.0) * k_conv
 
 wx_list = h.get('weather_code', [0])
 wx = int(wx_list[idx]) if (wx_list and len(wx_list) > idx and wx_list[idx] is not None) else 0
+
+# New Advanced X-Ray Metrics Extraction
+pop_raw = h.get('precipitation_probability', [0])
+pop = int(pop_raw[idx]) if pop_raw and len(pop_raw) > idx and pop_raw[idx] is not None else 0
+
+precip_raw = h.get('precipitation', [0])
+precip = float(precip_raw[idx]) if precip_raw and len(precip_raw) > idx and precip_raw[idx] is not None else 0.0
+
+cape_raw = h.get('cape', [0])
+cape = int(cape_raw[idx]) if cape_raw and len(cape_raw) > idx and cape_raw[idx] is not None else 0
+
+pbl_raw = h.get('boundary_layer_height', [0])
+pbl_m = float(pbl_raw[idx]) if pbl_raw and len(pbl_raw) > idx and pbl_raw[idx] is not None else 0.0
+pbl_ft = int(pbl_m * 3.28084)
 
 td = calc_td(t_temp, rh)
 sfc_spread = t_temp - td
@@ -741,7 +755,6 @@ search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_pr
 for layer in search_profile:
     h_agl = max(0, layer['h'] - sfc_elevation)
     if layer['spread'] <= 3.0: 
-        # Reverted Filter: Prevents forcing a 0ft OVC unless visibility is < 1.5 SM (Dense Fog)
         if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
         c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
         c_base_agl = int(round(h_agl, -2))
@@ -827,6 +840,15 @@ c[4].metric("Weather", weather_str)
 c[5].metric("Visibility", vis_disp)
 c[6].metric("Freezing LVL", frz_disp)
 c[7].metric("Cloud Base", c_base_disp)
+
+st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
+
+# NEW THERMODYNAMIC & AERODYNAMIC METRICS ROW
+c2 = st.columns(4)
+c2[0].metric("Precipitation Risk", f"{pop}% ({precip} mm)")
+c2[1].metric("PBL (Boundary Layer)", f"{pbl_ft:,} ft AGL" if pbl_ft > 0 else "NIL")
+c2[2].metric("CAPE (Instability)", f"{cape} J/kg")
+c2[3].empty() # Placeholder for balance
 
 st.divider()
 
@@ -1027,7 +1049,8 @@ def generate_pdf_report():
     pdf.set_font("helvetica", "B", 12)
     pdf.cell(0, 8, "FORECASTED SURFACE CONDITIONS", border=0, new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", "", 10)
-    pdf.multi_cell(0, 6, safe_txt(f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\nWind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\nWeather: {weather_str} | Visibility: {vis_disp}\nCloud Base: {c_base_disp} | Freezing Level: {frz_disp}"))
+    # ADDED NEW METRICS TO PDF REPORT
+    pdf.multi_cell(0, 6, safe_txt(f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\nWind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\nWeather: {weather_str} | Visibility: {vis_disp}\nCloud Base: {c_base_disp} | Freezing Level: {frz_disp}\nPrecip Risk: {pop}% ({precip} mm) | PBL Height: {pbl_ft:,} ft AGL | CAPE: {cape} J/kg"))
     pdf.ln(5)
 
     pdf.set_font("helvetica", "B", 12)
@@ -1070,7 +1093,7 @@ def generate_pdf_report():
             pdf.ln(8)
         pdf.ln(5)
 
-    draw_table("TACTICAL HAZARD STACK (0-400ft AGL)", df_tactical)
+    draw_table("TACTICAL Hazard STACK (0-400ft AGL)", df_tactical)
     draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)", df_ext)
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
