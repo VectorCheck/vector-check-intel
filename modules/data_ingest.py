@@ -19,12 +19,14 @@ def get_aviation_weather(icao):
         return "NIL", "NIL"
 
 def fetch_mission_data(lat, lon, model_url):
-    """Fetches tactical surface and 15-layer upper-air NWP data from Open-Meteo."""
+    """Fetches tactical surface, absolute AGL boundaries, and 15-layer upper-air NWP data."""
     
-    # Core surface and newly added thermodynamic/aerodynamic variables (Surface Pressure added)
+    # Core surface, absolute AGL wind vectors, and thermodynamic variables
     hourly_vars = (
-        "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,"
-        "wind_gusts_10m,weather_code,visibility,freezing_level_height,"
+        "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,"
+        "wind_speed_80m,wind_speed_120m,wind_speed_180m,"
+        "wind_direction_80m,wind_direction_120m,wind_direction_180m,"
+        "weather_code,visibility,freezing_level_height,"
         "precipitation_probability,precipitation,cape,boundary_layer_height,surface_pressure"
     )
     
