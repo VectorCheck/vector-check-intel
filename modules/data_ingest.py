@@ -1,64 +1,43 @@
-import json
 import urllib.request
-import streamlit as st
+import json
 
 def get_aviation_weather(icao):
+    """Fetches real-time METAR and TAF for the specified ICAO code."""
     try:
-        url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=raw&taf=true"
+        url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=raw"
         req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = response.read().decode('utf-8')
+        with urllib.request.urlopen(req, timeout=5) as response:
+            metar = response.read().decode('utf-8').strip()
             
-        parts = data.split('\n')
-        metar = parts[0] if len(parts) > 0 else "NIL"
-        taf = '\n'.join(parts[1:]) if len(parts) > 1 else "NIL"
-        return metar, taf
+        url_taf = f"https://aviationweather.gov/api/data/taf?ids={icao}&format=raw"
+        req_taf = urllib.request.Request(url_taf, headers={'User-Agent': 'VectorCheck-App/2.0'})
+        with urllib.request.urlopen(req_taf, timeout=5) as response_taf:
+            taf = response_taf.read().decode('utf-8').strip()
+            
+        return metar if metar else "NIL", taf if taf else "NIL"
     except Exception:
         return "NIL", "NIL"
 
 def fetch_mission_data(lat, lon, model_url):
+    """Fetches tactical surface and 15-layer upper-air NWP data from Open-Meteo."""
+    
+    # Core surface and newly added thermodynamic/aerodynamic variables
+    hourly_vars = (
+        "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,"
+        "wind_gusts_10m,weather_code,visibility,freezing_level_height,"
+        "precipitation_probability,precipitation,cape,boundary_layer_height"
+    )
+    
+    # 15-Layer Tactical Column (Unchanged - Core to proprietary logic)
+    p_levels = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150]
+    for p in p_levels:
+        hourly_vars += f",temperature_{p}hPa,relative_humidity_{p}hPa,geopotential_height_{p}hPa,wind_speed_{p}hPa,wind_direction_{p}hPa"
+    
+    url = f"{model_url}?latitude={lat}&longitude={lon}&hourly={hourly_vars}&elevation=nan&timezone=UTC"
+    
     try:
-        # COMMERCIAL SLA UPGRADE: Detect secure API key and reroute to dedicated servers
-        api_key = st.secrets.get("open_meteo", {}).get("api_key", None)
-        
-        if api_key:
-            model_url = model_url.replace("https://api.open-meteo.com", "https://customer-api.open-meteo.com")
-
-        # Base surface variables
-        vars_list = [
-            "temperature_2m", "relative_humidity_2m", "wind_speed_10m", 
-            "wind_gusts_10m", "wind_direction_10m", "weather_code", 
-            "visibility", "freezing_level_height"
-        ]
-        
-        # Dynamic Pressure Level Resolution
-        if "gem" in model_url:
-            p_levels = [1000, 925, 850, 700, 500, 250]
-        else:
-            p_levels = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150]
-            
-        for p in p_levels:
-            vars_list.extend([
-                f"temperature_{p}hPa", f"relative_humidity_{p}hPa", 
-                f"geopotential_height_{p}hPa", f"wind_speed_{p}hPa", 
-                f"wind_direction_{p}hPa"
-            ])
-            
-        vars_str = ",".join(vars_list)
-        
-        # Build URL
-        url = f"{model_url}?latitude={lat}&longitude={lon}&hourly={vars_str}&timezone=UTC"
-        
-        # Inject API Key for Commercial Authorization
-        if api_key:
-            url += f"&apikey={api_key}"
-        
         req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
         with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            return data
-            
-    except urllib.error.HTTPError as e:
-        return {"error": True, "message": f"HTTP {e.code}: {e.read().decode('utf-8')}"}
+            return json.loads(response.read().decode('utf-8'))
     except Exception as e:
         return {"error": True, "message": str(e)}
