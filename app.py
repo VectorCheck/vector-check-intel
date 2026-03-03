@@ -211,7 +211,6 @@ def calc_td(t, rh):
     return (b * alpha) / (a - alpha)
 
 def calculate_density_altitude(elevation_ft, temp_c, station_pressure_hpa):
-    """Calculates true aerodynamic Density Altitude."""
     pa = elevation_ft + 27.288 * (1013.25 - station_pressure_hpa)
     isa_t = 15.0 - (1.98 * (elevation_ft / 1000.0))
     da = pa + 118.8 * (temp_c - isa_t)
@@ -255,6 +254,12 @@ def calc_tactical_visibility(vis_raw_m, rh, w_spd, wx):
         else: vis_sm = 10.0
         
     if wx >= 50: return vis_sm
+
+    # THERMODYNAMIC VETO: Catch model hallucinated Fog at low RH
+    if wx in [45, 48] and rh < 95:
+        if rh >= 80: return max(vis_sm, 4.0)
+        else: return max(vis_sm, 7.0)
+
     if vis_sm < 3.0 and w_spd >= 10.0 and wx not in [45, 48]: return max(vis_sm, 6.0)
     if vis_sm < 4.0 and rh < 85: return max(vis_sm, 7.0)
     if vis_sm < 3.0 and wx <= 3 and rh < 95: return max(vis_sm, 4.0)
@@ -546,14 +551,12 @@ for i in range(nearest_idx, max_idx + 1):
     alt_t, alt_rh = get_interp_thermals(alt_msl, profile)
     icing_cond = calculate_icing_profile(h, i, wx)
     
-    # EXACT AGL INJECTION FOR GO/NO-GO MATRIX
     w_120_list = h.get('wind_speed_120m')
     w_120_val = w_120_list[i] if w_120_list and len(w_120_list) > i else None
     
     if w_120_val is not None:
         s_c = float(w_120_val) * k_conv
     else:
-        # Fallback to logarithmic
         u_v_list = h.get('wind_speed_1000hPa')
         if u_v_list and len(u_v_list) > i and u_v_list[i] is not None:
             u_v = float(u_v_list[i]) * k_conv
@@ -704,7 +707,7 @@ vis_sm = calc_tactical_visibility(vis_raw_val, rh, w_spd, wx)
 if vis_sm > 7: vis_disp = "> 7 SM"
 else: vis_disp = f"{vis_sm:.1f} SM"
 
-# 2. THERMAL PROFILE (Required for PBL Fallback & Ceilings)
+# 2. THERMAL PROFILE 
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
 for p in ALL_P_LEVELS:
     gh_list = h.get(f'geopotential_height_{p}hPa')
@@ -719,7 +722,7 @@ for p in ALL_P_LEVELS:
             if p_gh > thermal_profile[-1]['h']:
                 thermal_profile.append({'h': p_gh, 't': p_t, 'td': p_td, 'spread': p_t - p_td, 'rh': p_rh})
 
-# 3. RESTORED: ADVANCED METRICS 
+# 3. ADVANCED METRICS (Safely Restored)
 sfc_press_raw = h.get('surface_pressure')
 if sfc_press_raw and len(sfc_press_raw) > idx and sfc_press_raw[idx] is not None:
     sfc_press = float(sfc_press_raw[idx])
@@ -831,7 +834,6 @@ if has_agl_data:
     d_80 = float(d_80_raw) if d_80_raw is not None else sfc_dir
     d_120 = float(d_120_raw) if d_120_raw is not None else d_80
     
-    # Establish upper fallback purely for the trajectory code
     u_v, u_h, u_dir = w_120, 120.0, d_120 
 else:
     u_v_list = h.get('wind_speed_1000hPa')
@@ -860,7 +862,10 @@ moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro
 
 weather_str = get_weather_element(wx, w_spd)
 
-if wx < 40 and rh >= 95 and vis_sm < 7.0:
+# THERMODYNAMIC VETO & TACTICAL OVERRIDE FOR STRING DISPLAY
+if wx in [45, 48] and rh < 95:
+    weather_str = "HAZE (HZ)" if rh >= 80 else "CLEAR"
+elif wx < 40 and rh >= 95 and vis_sm < 7.0:
     if vis_sm <= 0.62: weather_str = "FOG (FG)"
     else: weather_str = "MIST (BR)"
 
