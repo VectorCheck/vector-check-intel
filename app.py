@@ -26,7 +26,7 @@ METERS_TO_SM = 1609.34
 ALL_P_LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150]
 PREFS_FILE = "user_prefs.json"
 
-# DETACHMENT FALLBACK COORDINATES (Used only if memory is wiped)
+# DETACHMENT FALLBACK COORDINATES
 USER_DEFAULTS = {
     "VCAG": {"lat": 44.1628, "lon": -77.3832},     # Belleville, ON
     "Vector1": {"lat": 54.4642, "lon": -110.1825}, # Cold Lake, AB
@@ -62,7 +62,6 @@ def sanitize_prefs(prefs, user):
     turb = str(prefs.get('turb', "MOD"))
     ice = str(prefs.get('ice', "NIL"))
     
-    # Check for crash-induced zeroes
     if lat == 0.0 or lon == 0.0:
         lat, lon = def_lat, def_lon
     if wind == 0 and ceil == 0:
@@ -167,7 +166,6 @@ This Agreement shall be governed by and construed in accordance with the laws of
                     st.session_state["eula_accepted"] = True
                     st.session_state["active_operator"] = user
                     
-                    # LOAD & SANITIZE PREFERENCES ON SUCCESSFUL LOGIN
                     raw_prefs = load_prefs(user)
                     lat, lon, wind, ceil, vis, turb, ice = sanitize_prefs(raw_prefs, user)
                     
@@ -190,7 +188,6 @@ This Agreement shall be governed by and construed in accordance with the laws of
 if not check_password():
     st.stop()
 
-# Ensure keys exist if session was restored without hitting the login block
 if "input_lat" not in st.session_state:
     current_op = st.session_state.get("active_operator", "UNKNOWN")
     raw_prefs = load_prefs(current_op)
@@ -212,6 +209,13 @@ def calc_td(t, rh):
     b = 243.04
     alpha = math.log(rh / 100.0) + ((a * t) / (b + t))
     return (b * alpha) / (a - alpha)
+
+def calculate_density_altitude(elevation_ft, temp_c, station_pressure_hpa):
+    """Calculates Density Altitude using exact station pressure."""
+    pa = elevation_ft + 27.288 * (1013.25 - station_pressure_hpa)
+    isa_t = 15.0 - (1.98 * (elevation_ft / 1000.0))
+    da = pa + 118.8 * (temp_c - isa_t)
+    return int(da)
 
 def get_interp_thermals(alt_msl, profile):
     if not profile: return 0.0, 0
@@ -271,8 +275,7 @@ def get_location_name(user_lat, user_lon):
         region = address.get('city', address.get('town', address.get('county', address.get('village', address.get('region', 'Unknown Region')))))
         province = address.get('state', address.get('country', 'Unknown'))
         
-        if region != 'Unknown Region' and province != 'Unknown':
-            return f"{region}, {province}"
+        if region != 'Unknown Region' and province != 'Unknown': return f"{region}, {province}"
         elif province != 'Unknown': return province
         else: return f"Coord: {user_lat:.2f}, {user_lon:.2f}"
     except Exception: 
@@ -339,8 +342,7 @@ def fetch_astronomy_cached(lat_val, lon_val, dt_iso_str, tz_name, tz_abbr_str):
 
 # --- SIDEBAR CONFIGURATION ---
 LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
-try:
-    st.sidebar.image(LOGO_URL, use_container_width=True)
+try: st.sidebar.image(LOGO_URL, use_container_width=True)
 except Exception:
     st.sidebar.title("Vector Check")
     st.sidebar.caption("Aerial Group Inc.")
@@ -354,7 +356,6 @@ s_lon = st.session_state.get('input_lon', -77.3832)
 lat = st.sidebar.number_input("Latitude", value=float(s_lat), format="%.4f")
 lon = st.sidebar.number_input("Longitude", value=float(s_lon), format="%.4f")
 
-# Manually push to state to ensure UI matches backend
 st.session_state['input_lat'] = lat
 st.session_state['input_lon'] = lon
 
@@ -375,8 +376,7 @@ model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (C
 
 def log_refresh_callback():
     st.cache_data.clear()
-    try:
-        log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "MANUAL_REFRESH")
+    try: log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "MANUAL_REFRESH")
     except Exception: pass 
 
 st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
@@ -388,10 +388,8 @@ model_api_map = {
 
 data = fetch_weather_payload(lat, lon, model_api_map[model_choice])
 
-if icao != "NONE":
-    metar_raw, taf_raw = fetch_metar_taf(icao)
-else:
-    metar_raw, taf_raw = "NIL", "NIL"
+if icao != "NONE": metar_raw, taf_raw = fetch_metar_taf(icao)
+else: metar_raw, taf_raw = "NIL", "NIL"
 
 st.title("Atmospheric Risk Management")
 st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.session_state.get('active_operator', 'UNKNOWN')}")
@@ -442,7 +440,6 @@ st.subheader("Impact Matrix")
 with st.expander("Configure Operational Constraints"):
     tc1, tc2, tc3, tc4, tc5 = st.columns(5)
     
-    # Anti-Ghosting Matrix Values
     s_wind = st.session_state.get('input_wind', 30)
     s_ceil = st.session_state.get('input_ceil', 500)
     s_vis = st.session_state.get('input_vis', 3.0)
@@ -493,6 +490,7 @@ for i in range(nearest_idx, max_idx + 1):
         gh_list = h.get(f'geopotential_height_{p}hPa')
         t_list = h.get(f'temperature_{p}hPa')
         rh_list = h.get(f'relative_humidity_{p}hPa')
+        # AUDIT FIX: Validate the high-altitude null bug before insertion
         if gh_list and t_list and rh_list and len(gh_list) > i:
             if gh_list[i] is not None and t_list[i] is not None and rh_list[i] is not None:
                 p_gh = float(gh_list[i]) * 3.28084
@@ -685,7 +683,7 @@ w_spd = (float(w_spd_raw) if w_spd_raw is not None else 0.0) * k_conv
 wx_list = h.get('weather_code', [0])
 wx = int(wx_list[idx]) if (wx_list and len(wx_list) > idx and wx_list[idx] is not None) else 0
 
-# New Advanced X-Ray Metrics Extraction
+# Advanced Extracted Metrics
 pop_raw = h.get('precipitation_probability', [0])
 pop = int(pop_raw[idx]) if pop_raw and len(pop_raw) > idx and pop_raw[idx] is not None else 0
 
@@ -695,12 +693,16 @@ precip = float(precip_raw[idx]) if precip_raw and len(precip_raw) > idx and prec
 cape_raw = h.get('cape', [0])
 cape = int(cape_raw[idx]) if cape_raw and len(cape_raw) > idx and cape_raw[idx] is not None else 0
 
-# FIX: PBL 0ft correctly displays instead of evaluating to NIL
 pbl_raw = h.get('boundary_layer_height', [0])
 pbl_val = pbl_raw[idx] if pbl_raw and len(pbl_raw) > idx else None
 pbl_m = float(pbl_val) if pbl_val is not None else 0.0
 pbl_ft = int(pbl_m * 3.28084)
 pbl_disp = f"{pbl_ft:,} ft AGL" if pbl_val is not None else "UNAVAILABLE"
+
+# DENSITY ALTITUDE INJECTION 
+sfc_press_raw = h.get('surface_pressure', [1013.25])
+sfc_press = float(sfc_press_raw[idx]) if sfc_press_raw and len(sfc_press_raw) > idx and sfc_press_raw[idx] is not None else 1013.25
+density_alt = calculate_density_altitude(sfc_elevation, t_temp, sfc_press)
 
 td = calc_td(t_temp, rh)
 sfc_spread = t_temp - td
@@ -720,6 +722,7 @@ for p in ALL_P_LEVELS:
     gh_list = h.get(f'geopotential_height_{p}hPa')
     t_list = h.get(f'temperature_{p}hPa')
     rh_list = h.get(f'relative_humidity_{p}hPa')
+    # AUDIT FIX: High altitude null prevention
     if gh_list and t_list and rh_list and len(gh_list) > idx:
         if gh_list[idx] is not None and t_list[idx] is not None and rh_list[idx] is not None:
             p_gh = float(gh_list[idx]) * 3.28084
@@ -822,7 +825,6 @@ moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro
 
 weather_str = get_weather_element(wx, w_spd)
 
-# Tactical TAF/METAR Override for Un-coded Mist/Fog (Requires 95% RH)
 if wx < 40 and rh >= 95 and vis_sm < 7.0:
     if vis_sm <= 0.62: weather_str = "FOG (FG)"
     else: weather_str = "MIST (BR)"
@@ -1089,11 +1091,11 @@ def generate_pdf_report():
     draw_table("TACTICAL HAZARD STACK (0-400ft AGL)", df_tactical)
     draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)", df_ext)
     
-    # NEW PDF SECTION FOR ADVANCED THERMODYNAMICS
+    # ADVANCED THERMODYNAMICS INCLUDING DA
     pdf.set_font("helvetica", "B", 12)
     pdf.cell(0, 8, "THERMODYNAMIC & AERODYNAMIC PROFILE", border=0, new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", "", 10)
-    pdf.multi_cell(0, 6, safe_txt(f"Precipitation Risk: {pop}% ({precip} mm)\nPlanetary Boundary Layer (PBL): {pbl_disp}\nConvective Available Potential Energy (CAPE): {cape} J/kg"))
+    pdf.multi_cell(0, 6, safe_txt(f"Precipitation Risk: {pop}% ({precip} mm)\nDensity Altitude (DA): {density_alt:,} ft | PBL Height: {pbl_disp}\nConvective Available Potential Energy (CAPE): {cape} J/kg"))
     pdf.ln(5)
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -1130,13 +1132,14 @@ fig = plot_convective_profile(h, idx, t_temp, td, w_spd, sfc_dir, sfc_elevation)
 if fig: st.pyplot(fig)
 else: st.warning("Insufficient atmospheric layers available to render vertical profile.")
 
-# MOVED THERMODYNAMIC & AERODYNAMIC METRICS ROW
 st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+
+# ADDED DENSITY ALTITUDE TO THE UI METRICS ROW
 c2 = st.columns(4)
 c2[0].metric("Precipitation Risk", f"{pop}% ({precip} mm)")
-c2[1].metric("PBL (Boundary Layer)", pbl_disp)
-c2[2].metric("CAPE (Instability)", f"{cape} J/kg")
-c2[3].empty() # Placeholder for visual balance
+c2[1].metric("Density Altitude (DA)", f"{density_alt:,} ft")
+c2[2].metric("PBL (Boundary Layer)", pbl_disp)
+c2[3].metric("CAPE (Instability)", f"{cape} J/kg")
 
 st.divider()
 st.markdown("""
