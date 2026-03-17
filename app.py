@@ -487,6 +487,9 @@ for i in range(nearest_idx, max_idx + 1):
     td = calc_td(t_temp, rh_v)
     sfc_spread = t_temp - td
     
+    sn_depth_raw = h.get('snow_depth', [0])
+    sn_depth = float(sn_depth_raw[i]) if sn_depth_raw and len(sn_depth_raw) > i and sn_depth_raw[i] is not None else 0.0
+    
     vis_raw_list = h.get('visibility')
     vis_raw_val = vis_raw_list[i] if vis_raw_list and len(vis_raw_list) > i else None
     vis_sm = calc_tactical_visibility(vis_raw_val, rh_v, w_spd, wx)
@@ -507,7 +510,6 @@ for i in range(nearest_idx, max_idx + 1):
     lapse_rate_temp_drop = t_temp - t_950
     is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
     
-    # THERMAL PHASE GATE (PRECIPITATION VETO)
     precip_raw_top = h.get('precipitation', [0])
     precip_val_top = float(precip_raw_top[i]) if precip_raw_top and len(precip_raw_top) > i and precip_raw_top[i] is not None else 0.0
 
@@ -533,6 +535,24 @@ for i in range(nearest_idx, max_idx + 1):
             wx = 69 if is_heavy else 68
         else:
             wx = 63 if is_heavy else 61
+            
+    # RECALIBRATED BLSN/DRSN KINETIC SPLIT FOR MATRIX
+    is_snowing = wx in [71, 73, 75, 77, 85, 86, 68, 69]
+    is_cold_snow = t_temp <= -5.0
+    has_snowpack = sn_depth >= 0.05 
+
+    blsn_trigger = False
+    
+    if is_cold_snow:
+        if is_snowing:
+            if w_spd >= 20.0 or gst >= 30.0:
+                blsn_trigger = True
+        elif has_snowpack:
+            if w_spd >= 25.0 or gst >= 35.0:
+                blsn_trigger = True
+
+    if blsn_trigger:
+        if vis_sm > 4.0: vis_sm = max(1.5, vis_sm * 0.5)
         
     c_base_agl = 99999 
     c_amt = "CLR"
@@ -729,15 +749,15 @@ wx = int(wx_list[idx]) if (wx_list and len(wx_list) > idx and wx_list[idx] is no
 td = calc_td(t_temp, rh)
 sfc_spread = t_temp - td
 
+sn_depth_raw = h.get('snow_depth', [0])
+sn_depth = float(sn_depth_raw[idx]) if sn_depth_raw and len(sn_depth_raw) > idx and sn_depth_raw[idx] is not None else 0.0
+
 sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
 sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
 vis_raw_list = h.get('visibility')
 vis_raw_val = vis_raw_list[idx] if vis_raw_list and len(vis_raw_list) > idx else None
 vis_sm = calc_tactical_visibility(vis_raw_val, rh, w_spd, wx)
-
-if vis_sm > 7: vis_disp = "> 7 SM"
-else: vis_disp = f"{vis_sm:.1f} SM"
 
 # 2. THERMAL PROFILE 
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
@@ -880,6 +900,51 @@ raw_gst_list = h.get('wind_gusts_10m')
 raw_gst = (float(raw_gst_list[idx]) * k_conv) if (raw_gst_list and len(raw_gst_list) > idx and raw_gst_list[idx] is not None) else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
+# RECALIBRATED DRIFTING VS BLOWING SNOW STRING OVERRIDE
+is_snowing = wx in [71, 73, 75, 77, 85, 86, 68, 69]
+is_cold_snow = t_temp <= -5.0
+has_snowpack = sn_depth >= 0.05
+
+blsn_trigger = False
+drsn_trigger = False
+
+if is_cold_snow:
+    if is_snowing:
+        if w_spd >= 20.0 or gst >= 30.0:
+            blsn_trigger = True
+    elif has_snowpack:
+        if w_spd >= 25.0 or gst >= 35.0:
+            blsn_trigger = True
+        elif w_spd >= 15.0 or gst >= 20.0:
+            drsn_trigger = True
+
+weather_str = get_weather_element(wx, w_spd)
+
+if wx in [45, 48]:
+    if rh < 85:
+        weather_str = "HAZE (HZ)" if rh >= 75 else "CLEAR"
+    else:
+        weather_str = "FREEZING FOG (FZFG)" if t_temp <= 0 else "FOG (FG)"
+elif wx < 40 and vis_sm < 7.0:
+    if rh >= 85:
+        if vis_sm <= 0.62: 
+            weather_str = "FREEZING FOG (FZFG)" if t_temp <= 0 else "FOG (FG)"
+        else: 
+            weather_str = "MIST (BR)"
+    elif rh >= 75:
+        weather_str = "HAZE (HZ)"
+
+if blsn_trigger:
+    if is_snowing:
+        weather_str = f"{weather_str} & BLSN"
+    else:
+        weather_str = "BLOWING SNOW (BLSN)"
+elif drsn_trigger:
+    weather_str = "DRIFTING SNOW (DRSN)"
+
+if vis_sm > 7: vis_disp = "> 7 SM"
+else: vis_disp = f"{vis_sm:.1f} SM"
+
 # 4. EXACT AGL INJECTION FOR TACTICAL STACK
 w_80_raw = h.get('wind_speed_80m', [None])[idx]
 w_120_raw = h.get('wind_speed_120m', [None])[idx]
@@ -919,22 +984,6 @@ space_data = fetch_space_weather_cached(dt_utc_exact_iso)
 
 sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL"
 moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL"
-
-weather_str = get_weather_element(wx, w_spd)
-
-if wx in [45, 48]:
-    if rh < 85:
-        weather_str = "HAZE (HZ)" if rh >= 75 else "CLEAR"
-    else:
-        weather_str = "FREEZING FOG (FZFG)" if t_temp <= 0 else "FOG (FG)"
-elif wx < 40 and vis_sm < 7.0:
-    if rh >= 85:
-        if vis_sm <= 0.62: 
-            weather_str = "FREEZING FOG (FZFG)" if t_temp <= 0 else "FOG (FG)"
-        else: 
-            weather_str = "MIST (BR)"
-    elif rh >= 75:
-        weather_str = "HAZE (HZ)"
 
 if int(w_spd) == 0: sfc_dir_disp, sfc_spd_disp = "CALM", "0"
 elif int(w_spd) <= 3: sfc_dir_disp, sfc_spd_disp = "VRB", "3"
