@@ -1,67 +1,69 @@
-import requests
+import urllib.request
+import json
 from datetime import datetime, timezone
 
-def evaluate_gnss_risk(kp):
-    """Translates the raw Kp index into tactical drone operational impacts."""
-    kp_int = int(round(kp))
-    if kp_int <= 3:
-        return {"kp": kp, "risk": "LOW", "impact": "Nominal GNSS lock and C2 integrity."}
-    elif kp_int == 4:
-        return {"kp": kp, "risk": "MODERATE", "impact": "Active state. Minor GNSS jitter. Possible RTK initialization delay."}
-    elif kp_int == 5:
-        return {"kp": kp, "risk": "HIGH (G1)", "impact": "Minor Geomagnetic Storm. Expect GPS signal degradation and C2 interference."}
-    elif kp_int >= 6:
-        return {"kp": kp, "risk": "SEVERE (G2+)", "impact": "Major Geomagnetic Storm. High risk of GNSS loss. Manual flight only."}
-    
-    return {"kp": kp, "risk": "UNKNOWN", "impact": "Data processing error."}
-
-def get_kp_index(target_utc):
-    """Fetches the NOAA Planetary K-index forecast with impenetrable data scrubbing."""
+def get_kp_index(target_dt_utc):
+    """
+    Fetches Planetary K-index from the NOAA SWPC JSON API.
+    Determines GNSS and C2 link risk based on geomagnetic storm scaling.
+    """
     url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
-    headers = {"User-Agent": "VectorCheckAerialGroup/1.0 (ops.vectorcheck.ca)"}
     
+    # Graceful degradation fallback if NOAA goes offline
+    fallback_data = {
+        'kp': "N/A", 
+        'risk': "UNAVAILABLE", 
+        'impact': "NOAA SWPC connection failed or format changed. Monitor local GNSS satellite counts and HDOP closely prior to launch."
+    }
+
     try:
-        response = requests.get(url, headers=headers, timeout=5)
-        response.raise_for_status() 
-        data = response.json()
-        
-        closest_kp = None
+        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            
+        # NOAA JSON format: [["time_tag", "kp", "observed", "noaa_scale"], ["2026-04-04 00:00:00", "3.33", ...]]
+        if not data or len(data) < 2:
+            return fallback_data
+
+        best_kp = None
         min_diff = float('inf')
         
-        for row in data:
-            if not row or not isinstance(row, list): continue
+        # Iterate through the forecast array to find the closest time match
+        for row in data[1:]:
+            time_str, kp_str = row[0], row[1]
             
-            # Explicitly skip the header row
-            if str(row[0]).strip() == "time_tag": continue 
+            # NOAA time_tag format: "YYYY-MM-DD HH:MM:SS"
+            row_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            diff = abs((row_dt - target_dt_utc).total_seconds())
             
-            try:
-                row_dt = datetime.strptime(str(row[0]), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-            except Exception:
-                continue # Skip rows with broken timestamps
-                
-            predicted_kp = None
+            if diff < min_diff:
+                min_diff = diff
+                best_kp = float(kp_str)
+
+        if best_kp is None:
+            return fallback_data
+
+        kp_val = int(round(best_kp))
+        
+        # Tactical Risk Matrix for UAS
+        if kp_val <= 3:
+            risk = "LOW (G0)"
+            impact = "Optimal GNSS lock. Minimal ionospheric scintillation expected. C2 link stable."
+        elif kp_val == 4:
+            risk = "MODERATE (G0)"
+            impact = "Slight ionospheric degradation possible. Verify minimum satellite count and HDOP before launch."
+        elif kp_val == 5:
+            risk = "HIGH (G1)"
+            impact = "Minor GNSS positioning errors likely. Potential for intermittent C2 link degradation and compass anomalies."
+        elif kp_val >= 6:
+            risk = "SEVERE (G2+)"
+            impact = "CRITICAL: High probability of GNSS loss of lock, flyaways, and C2 link failure. Manual ATTI mode readiness required."
             
-            # Brute-force float testing: Scan columns right-to-left
-            for i in [3, 2, 1]:
-                if len(row) > i and row[i]:
-                    try:
-                        predicted_kp = float(str(row[i]).strip())
-                        break # Successfully found a valid number
-                    except ValueError:
-                        pass # It was a rogue string like 'observed', keep searching
-                        
-            if predicted_kp is not None:
-                diff = abs((target_utc - row_dt).total_seconds())
-                if diff < min_diff:
-                    min_diff = diff
-                    closest_kp = predicted_kp
-                    
-        if closest_kp is not None:
-            return evaluate_gnss_risk(closest_kp)
-        else:
-            return {"kp": "ERR", "risk": "PARSE_FAIL", "impact": "Connected to NOAA, but no valid Kp numbers found."}
-            
-    except requests.exceptions.HTTPError as err:
-        return {"kp": "ERR", "risk": "HTTP_ERR", "impact": f"NOAA Firewall Block: {err}"}
-    except Exception as e:
-        return {"kp": "ERR", "risk": "SYS_ERR", "impact": f"System Exception: {str(e)}"}
+        return {
+            'kp': str(kp_val),
+            'risk': risk,
+            'impact': impact
+        }
+
+    except Exception:
+        return fallback_data
