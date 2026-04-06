@@ -24,7 +24,7 @@ from modules.space_weather  import get_kp_index
 # FIX: calc_td and calculate_density_altitude now live exclusively in physics.py.
 # Importing from the single authoritative source eliminates the previous duplicate
 # definition in this file and in visualizations.py.
-from modules.physics import calc_td, calculate_density_altitude, SNOWPACK_BLSN_THRESHOLD_M
+from modules.physics import calc_td, calculate_density_altitude, SNOWPACK_BLSN_THRESHOLD_M, attenuate_gust_delta
 
 # =============================================================================
 # CONSTANTS & PREFERENCES
@@ -61,8 +61,10 @@ USER_DEFAULTS = {
 #   );
 # =============================================================================
 
+@st.cache_resource
 def _get_supabase() -> Client | None:
-    """Returns a Supabase client or None if secrets are unavailable."""
+    """Returns a cached Supabase client. Created once, reused across all calls.
+    FIX: Previously created a new TCP connection per invocation."""
     try:
         url = st.secrets["supabase"]["url"]
         key = st.secrets["supabase"]["key"]
@@ -147,15 +149,15 @@ def sanitize_prefs(prefs: dict, user: str) -> tuple:
     def_lat, def_lon = base_loc["lat"], base_loc["lon"]
 
     try:    lat  = float(prefs.get('lat',  def_lat))
-    except: lat  = def_lat
+    except (ValueError, TypeError): lat  = def_lat
     try:    lon  = float(prefs.get('lon',  def_lon))
-    except: lon  = def_lon
+    except (ValueError, TypeError): lon  = def_lon
     try:    wind = int(prefs.get('wind', 30))
-    except: wind = 30
+    except (ValueError, TypeError): wind = 30
     try:    ceil = int(prefs.get('ceil', 500))
-    except: ceil = 500
+    except (ValueError, TypeError): ceil = 500
     try:    vis  = float(prefs.get('vis', 3.0))
-    except: vis  = 3.0
+    except (ValueError, TypeError): vis  = 3.0
 
     turb = str(prefs.get('turb', "MOD"))
     ice  = str(prefs.get('ice',  "NIL"))
@@ -311,9 +313,11 @@ def format_dir(d: float, spd: float) -> int:
 
 
 def hazard_lvl(h_str: str) -> float:
+    """FIX: Previous ordering checked 'SEV' before 'MOD-SEV', causing MOD-SEV
+    to always return 3.0. Longest-match-first ordering is now correct."""
     h_str = h_str.upper()
+    if "MOD-SEV" in h_str: return 2.5   # Must precede both "SEV" and "MOD"
     if "SEV"     in h_str: return 3
-    if "MOD-SEV" in h_str: return 2.5
     if "MOD"     in h_str: return 2
     if "LGT"     in h_str: return 1
     return 0
@@ -515,9 +519,9 @@ def compute_impact_matrix(
                         profile.append({'h': p_gh, 't': p_t, 'td': p_td, 'spread': p_t - p_td, 'rh': p_rh})
 
         # --- Convective assessment ---
-        t_950_list = h_data.get('temperature_925hPa')
-        t_950      = float(t_950_list[mat_i]) if (t_950_list and len(t_950_list) > mat_i and t_950_list[mat_i] is not None) else t_temp
-        is_convective = (wx >= 80) or ((t_temp - t_950) >= 7.5 and t_temp >= 10.0)
+        t_925_list = h_data.get('temperature_925hPa')
+        t_925      = float(t_925_list[mat_i]) if (t_925_list and len(t_925_list) > mat_i and t_925_list[mat_i] is not None) else t_temp
+        is_convective = (wx >= 80) or ((t_temp - t_925) >= 7.5 and t_temp >= 10.0)
 
         precip_raw_top = h_data.get('precipitation', [0])
         precip_val_top = float(precip_raw_top[mat_i]) if precip_raw_top and len(precip_raw_top) > mat_i and precip_raw_top[mat_i] is not None else 0.0
@@ -972,7 +976,7 @@ else:
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list and len(frz_raw_list) > forecast_idx and frz_raw_list[forecast_idx] is not None:
     frz_raw  = float(frz_raw_list[forecast_idx])
-    frz_disp = "SFC" if t_temp <= 0 else f"{int(round(frz_raw * 3.28, -2)):,} ft"
+    frz_disp = "SFC" if t_temp <= 0 else f"{int(round(frz_raw * 3.28084, -2)):,} ft"
 else:
     if t_temp <= 0:
         frz_disp = "SFC"
@@ -986,9 +990,9 @@ else:
                 frz_disp = f"{int(round(frz_h, -2)):,} ft"
                 break
 
-t_950_list    = h.get('temperature_925hPa')
-t_950         = float(t_950_list[forecast_idx]) if (t_950_list and len(t_950_list) > forecast_idx and t_950_list[forecast_idx] is not None) else t_temp
-lapse_rate_temp_drop = t_temp - t_950
+t_925_list    = h.get('temperature_925hPa')
+t_925         = float(t_925_list[forecast_idx]) if (t_925_list and len(t_925_list) > forecast_idx and t_925_list[forecast_idx] is not None) else t_temp
+lapse_rate_temp_drop = t_temp - t_925
 is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
 
 
@@ -1238,7 +1242,7 @@ else:
         s_e     = blw['s'] + frac * (abv['s'] - blw['s'])
         d_e_raw = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
         d_e     = format_dir(d_e_raw, s_e)
-        g_e     = s_e + gust_delta
+        g_e     = s_e + attenuate_gust_delta(gust_delta, alt)
 
         alt_msl = sfc_elevation + alt
         alt_t, alt_rh = get_interp_thermals(alt_msl, thermal_profile)
@@ -1510,10 +1514,15 @@ This system translates raw meteorological model data for uncrewed systems. It do
 
 
 # AUTO-SAVE STATE PERSISTENCE ENGINE
-try:
-    save_prefs(
-        st.session_state.get("active_operator", "UNKNOWN"),
-        lat, lon, t_wind, t_ceil, t_vis, t_turb, t_ice
-    )
-except Exception:
-    pass
+# FIX: Previously fired on every Streamlit rerender (every slider move).
+# Now only writes when the preference values actually change.
+_current_prefs_key = f"{lat}_{lon}_{t_wind}_{t_ceil}_{t_vis}_{t_turb}_{t_ice}"
+if st.session_state.get("_last_saved_prefs_key") != _current_prefs_key:
+    try:
+        save_prefs(
+            st.session_state.get("active_operator", "UNKNOWN"),
+            lat, lon, t_wind, t_ceil, t_vis, t_turb, t_ice
+        )
+        st.session_state["_last_saved_prefs_key"] = _current_prefs_key
+    except Exception:
+        pass
