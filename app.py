@@ -20,6 +20,7 @@ from modules.visualizations import plot_convective_profile
 from modules.telemetry      import log_action
 from modules.astronomy      import get_astronomical_data
 from modules.space_weather  import get_kp_index
+from modules.climate_ingest import get_climate_context
 
 # FIX: calc_td and calculate_density_altitude now live exclusively in physics.py.
 # Importing from the single authoritative source eliminates the previous duplicate
@@ -344,6 +345,32 @@ def calc_tactical_visibility(vis_raw_m, rh: int, w_spd: float, wx: int) -> float
     return vis_sm
 
 
+def _pct_rank(value: float, pcts: dict) -> int:
+    """Computes approximate percentile rank (0-99) from cached percentile dict."""
+    if pcts.get("n", 0) == 0:
+        return 50
+    thresholds = [
+        (pcts["p10"], 10), (pcts["p25"], 25), (pcts["p50"], 50),
+        (pcts["p75"], 75), (pcts["p90"], 90), (pcts["p99"], 99),
+    ]
+    prev_val, prev_pct = 0, 0
+    for t_val, t_pct in thresholds:
+        if value <= t_val:
+            span = t_val - prev_val if t_val != prev_val else 1
+            return int(prev_pct + (t_pct - prev_pct) * ((value - prev_val) / span))
+        prev_val, prev_pct = t_val, t_pct
+    return 99
+
+
+def _pct_label(p: int) -> tuple[str, str]:
+    """Returns (label_text, hex_color) for a percentile value."""
+    if p >= 90:   return f"P{p} — Anomalous",    "#ff4b4b"
+    elif p >= 75: return f"P{p} — Elevated",      "#E58E26"
+    elif p <= 10: return f"P{p} — Unusually low",  "#ff4b4b"
+    elif p <= 25: return f"P{p} — Below avg",      "#E58E26"
+    else:         return f"P{p} — Normal",          "#2abf2a"
+
+
 # =============================================================================
 # SPATIAL ENGINES & CACHED DATA FETCH
 # =============================================================================
@@ -430,6 +457,45 @@ def fetch_astronomy_cached(lat_val: float, lon_val: float, dt_iso_str: str, tz_n
     dt_utc   = datetime.fromisoformat(dt_iso_str).replace(tzinfo=timezone.utc)
     local_tz = pytz.timezone(tz_name) if tz_name else timezone.utc
     return get_astronomical_data(lat_val, lon_val, dt_utc, local_tz, tz_abbr_str)
+
+
+@st.cache_data(ttl=86400, show_spinner="Loading 30-year climate context...")
+def fetch_climate_context_cached(lat_val: float, lon_val: float, month_val: int) -> dict:
+    """Fetches 30-year ERA5 climate context with 24-hour cache.
+
+    Returns a dict (not a dataclass) because st.cache_data requires
+    serializable return types.
+    """
+    sb = _get_supabase()
+    api_key = st.secrets.get("open_meteo", {}).get("api_key", None)
+
+    ctx = get_climate_context(lat_val, lon_val, month_val, sb_client=sb, api_key=api_key)
+
+    return {
+        "lat_bin": ctx.lat_bin, "lon_bin": ctx.lon_bin,
+        "month": ctx.month, "years_range": ctx.years_range,
+        "error": ctx.error, "cached": ctx.cached,
+        "wind": {"p10": ctx.wind.p10, "p25": ctx.wind.p25, "p50": ctx.wind.p50,
+                 "p75": ctx.wind.p75, "p90": ctx.wind.p90, "p99": ctx.wind.p99,
+                 "mean": ctx.wind.mean, "n": ctx.wind.sample_count},
+        "temp": {"p10": ctx.temp.p10, "p25": ctx.temp.p25, "p50": ctx.temp.p50,
+                 "p75": ctx.temp.p75, "p90": ctx.temp.p90, "p99": ctx.temp.p99,
+                 "mean": ctx.temp.mean, "n": ctx.temp.sample_count},
+        "pressure": {"p10": ctx.pressure.p10, "p25": ctx.pressure.p25, "p50": ctx.pressure.p50,
+                     "p75": ctx.pressure.p75, "p90": ctx.pressure.p90, "p99": ctx.pressure.p99,
+                     "mean": ctx.pressure.mean, "n": ctx.pressure.sample_count},
+        "rh": {"p10": ctx.rh.p10, "p25": ctx.rh.p25, "p50": ctx.rh.p50,
+               "p75": ctx.rh.p75, "p90": ctx.rh.p90, "p99": ctx.rh.p99,
+               "mean": ctx.rh.mean, "n": ctx.rh.sample_count},
+        "wind_rose": [
+            {"dir": wr.direction, "total": wr.total_pct,
+             "calm": wr.calm_pct, "mod": wr.moderate_pct, "strong": wr.strong_pct,
+             "avg_spd": wr.avg_speed_kt}
+            for wr in ctx.wind_rose
+        ],
+        "prevailing_dir": ctx.prevailing_dir,
+        "prevailing_pct": ctx.prevailing_pct,
+    }
 
 
 # =============================================================================
@@ -1341,6 +1407,180 @@ else:
         </div>
     </div>
     ''', unsafe_allow_html=True)
+
+st.divider()
+
+
+# =============================================================================
+# CLIMATE CONTEXT PANEL
+# 30-year ERA5 reanalysis normals with percentile positioning and wind
+# direction frequency bars. Cached in Supabase after first computation.
+# =============================================================================
+
+st.subheader("Climate Context")
+
+_climate_month = datetime.fromisoformat(h["time"][forecast_idx]).month
+climate = fetch_climate_context_cached(lat, lon, _climate_month)
+
+if climate["error"]:
+    st.warning(f"Climate data unavailable: {climate['error']}")
+else:
+    _month_names = ["", "January", "February", "March", "April", "May", "June",
+                    "July", "August", "September", "October", "November", "December"]
+    _month_name = _month_names[climate["month"]]
+
+    st.caption(f"30-year ERA5 reanalysis ({climate['years_range']}) \u00b7 {regional_name} \u00b7 {_month_name}")
+
+    clim_left, clim_right = st.columns([3, 2])
+
+    with clim_left:
+        # --- Metric Cards: forecast value + 30-year average ---
+        cc1, cc2, cc3, cc4 = st.columns(4)
+
+        _w_pct = _pct_rank(w_spd, climate["wind"])
+        _w_lbl, _w_clr = _pct_label(_w_pct)
+        cc1.markdown(f"""
+        <div style="background:#1B1E23;padding:10px 12px;border-radius:6px;">
+            <div style="font-size:0.7rem;color:#8E949E;text-transform:uppercase;letter-spacing:0.4px;">Forecast Wind</div>
+            <div style="display:flex;align-items:baseline;gap:6px;margin-top:2px;">
+                <span style="font-size:1.2rem;font-weight:500;color:#E58E26;">{int(w_spd)} kt</span>
+                <span style="font-size:0.7rem;color:#8E949E;">avg <b style="color:#A0A4AB;">{climate['wind']['p50']:.0f} kt</b></span>
+            </div>
+            <div style="font-size:0.7rem;color:{_w_clr};margin-top:2px;">{_w_lbl}</div>
+        </div>""", unsafe_allow_html=True)
+
+        _t_pct = _pct_rank(t_temp, climate["temp"])
+        _t_lbl, _t_clr = _pct_label(_t_pct)
+        cc2.markdown(f"""
+        <div style="background:#1B1E23;padding:10px 12px;border-radius:6px;">
+            <div style="font-size:0.7rem;color:#8E949E;text-transform:uppercase;letter-spacing:0.4px;">Temperature</div>
+            <div style="display:flex;align-items:baseline;gap:6px;margin-top:2px;">
+                <span style="font-size:1.2rem;font-weight:500;color:#E58E26;">{t_temp}\u00b0C</span>
+                <span style="font-size:0.7rem;color:#8E949E;">avg <b style="color:#A0A4AB;">{climate['temp']['p50']:.1f}\u00b0C</b></span>
+            </div>
+            <div style="font-size:0.7rem;color:{_t_clr};margin-top:2px;">{_t_lbl}</div>
+        </div>""", unsafe_allow_html=True)
+
+        _p_pct = _pct_rank(sfc_press, climate["pressure"])
+        _p_lbl, _p_clr = _pct_label(_p_pct)
+        cc3.markdown(f"""
+        <div style="background:#1B1E23;padding:10px 12px;border-radius:6px;">
+            <div style="font-size:0.7rem;color:#8E949E;text-transform:uppercase;letter-spacing:0.4px;">Pressure</div>
+            <div style="display:flex;align-items:baseline;gap:6px;margin-top:2px;">
+                <span style="font-size:1.2rem;font-weight:500;color:#E58E26;">{sfc_press:.0f} hPa</span>
+                <span style="font-size:0.7rem;color:#8E949E;">avg <b style="color:#A0A4AB;">{climate['pressure']['p50']:.0f} hPa</b></span>
+            </div>
+            <div style="font-size:0.7rem;color:{_p_clr};margin-top:2px;">{_p_lbl}</div>
+        </div>""", unsafe_allow_html=True)
+
+        _da_pct = _pct_rank(density_alt, climate["temp"])
+        _da_lbl, _da_clr = _pct_label(_da_pct)
+        _da_avg = int(climate["temp"]["p50"] * 40 + sfc_elevation)
+        cc4.markdown(f"""
+        <div style="background:#1B1E23;padding:10px 12px;border-radius:6px;">
+            <div style="font-size:0.7rem;color:#8E949E;text-transform:uppercase;letter-spacing:0.4px;">Density Alt</div>
+            <div style="display:flex;align-items:baseline;gap:6px;margin-top:2px;">
+                <span style="font-size:1.2rem;font-weight:500;color:#E58E26;">{density_alt:,} ft</span>
+                <span style="font-size:0.7rem;color:#8E949E;">avg <b style="color:#A0A4AB;">~{_da_avg:,} ft</b></span>
+            </div>
+            <div style="font-size:0.7rem;color:{_da_clr};margin-top:2px;">{_da_lbl}</div>
+        </div>""", unsafe_allow_html=True)
+
+        # --- Percentile Bars ---
+        st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:0.85rem;font-weight:500;color:#D1D5DB;margin-bottom:6px;'>Percentile Position vs 30-Year Normals</div>", unsafe_allow_html=True)
+
+        _rh_pct = _pct_rank(rh, climate["rh"])
+
+        _bar_data = [
+            ("Wind",     _w_pct,  "linear-gradient(90deg,#2abf2a,#E58E26 50%,#ff4b4b)"),
+            ("Temp",     _t_pct,  "linear-gradient(90deg,#2abf2a,#E58E26 50%,#ff4b4b)"),
+            ("Pressure", _p_pct,  "linear-gradient(90deg,#ff4b4b,#E58E26 40%,#2abf2a 60%,#E58E26 80%,#ff4b4b)"),
+            ("RH",       _rh_pct, "linear-gradient(90deg,#2abf2a,#E58E26 50%,#ff4b4b)"),
+            ("DA",       _da_pct, "linear-gradient(90deg,#2abf2a,#E58E26 50%,#ff4b4b)"),
+        ]
+
+        for _bar_label, _bar_pct, _bar_grad in _bar_data:
+            _, _bar_clr = _pct_label(_bar_pct)
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;gap:6px;margin:4px 0;">
+                <span style="font-size:0.75rem;color:#8E949E;min-width:58px;text-align:right;">{_bar_label}</span>
+                <div style="flex:1;height:12px;background:#1B1E23;border-radius:6px;position:relative;overflow:hidden;">
+                    <div style="width:100%;height:100%;background:{_bar_grad};opacity:0.2;border-radius:6px;"></div>
+                    <div style="position:absolute;left:50%;top:1px;height:10px;border-left:1.5px dashed #3E444E;"></div>
+                    <div style="position:absolute;left:{_bar_pct}%;top:-2px;width:3px;height:16px;background:#D1D5DB;border-radius:2px;"></div>
+                </div>
+                <span style="font-size:0.7rem;color:{_bar_clr};min-width:30px;">P{_bar_pct}</span>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("""
+        <div style="display:flex;gap:10px;margin-top:6px;font-size:0.65rem;color:#5C6370;">
+            <span>\u25cf Normal</span><span style="color:#E58E26;">\u25cf Elevated</span><span style="color:#ff4b4b;">\u25cf Anomalous</span>
+            <span style="margin-left:auto;font-style:italic;">\u2506 median &nbsp; \u25ae forecast</span>
+        </div>""", unsafe_allow_html=True)
+
+    with clim_right:
+        st.markdown(f"<div style='font-size:0.85rem;font-weight:500;color:#D1D5DB;margin-bottom:2px;'>Wind Direction \u2014 {_month_name} Normals</div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:0.7rem;color:#5C6370;margin-bottom:8px;'>Sorted by frequency \u00b7 bars show speed breakdown</div>", unsafe_allow_html=True)
+
+        _cur_dir_name = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][int(round(sfc_dir / 45.0)) % 8] if w_spd > 0 else ""
+
+        _max_pct = max((wr["total"] for wr in climate["wind_rose"]), default=20)
+        _bar_scale = 85.0 / max(1, _max_pct)
+
+        for _wr in climate["wind_rose"]:
+            _is_current = (_wr["dir"] == _cur_dir_name) and w_spd > 0
+            _calm_w  = _wr["calm"] * _bar_scale
+            _mod_w   = (_wr["calm"] + _wr["mod"]) * _bar_scale
+            _strong_w = (_wr["calm"] + _wr["mod"] + _wr["strong"]) * _bar_scale
+
+            _now_html = ""
+            if _is_current:
+                _now_html = f"""
+                <div style="position:absolute;left:{min(95, _strong_w + 8)}%;top:-3px;width:2.5px;height:22px;background:#ff4b4b;border-radius:2px;"></div>
+                <div style="position:absolute;left:{min(95, _strong_w + 8)}%;top:-16px;font-size:0.55rem;font-weight:500;color:#ff4b4b;transform:translateX(-50%);white-space:nowrap;">{int(sfc_dir)}\u00b0 {int(w_spd)}kt</div>
+                """
+            _mb = "16px" if _is_current else "4px"
+
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;gap:0;margin-bottom:{_mb};position:relative;">
+                <span style="font-size:0.75rem;font-weight:500;color:#8E949E;width:24px;text-align:right;margin-right:6px;">{_wr['dir']}</span>
+                <div style="flex:1;height:16px;background:#1B1E23;border-radius:3px;position:relative;overflow:visible;">
+                    <div style="position:absolute;left:0;top:0;width:{_strong_w}%;height:100%;background:#ff4b4b;opacity:0.45;border-radius:3px;"></div>
+                    <div style="position:absolute;left:0;top:0;width:{_mod_w}%;height:100%;background:#E58E26;opacity:0.5;border-radius:3px;"></div>
+                    <div style="position:absolute;left:0;top:0;width:{_calm_w}%;height:100%;background:#2abf2a;opacity:0.4;border-radius:3px;"></div>
+                    {_now_html}
+                </div>
+                <span style="font-size:0.65rem;color:#8E949E;margin-left:6px;min-width:28px;">{_wr['total']:.0f}%</span>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("""
+        <div style="display:flex;gap:8px;margin-top:6px;font-size:0.65rem;color:#5C6370;">
+            <span style="color:#2abf2a;">\u25cf 0\u201310kt</span><span style="color:#E58E26;">\u25cf 10\u201320kt</span><span style="color:#ff4b4b;">\u25cf 20+kt</span>
+        </div>""", unsafe_allow_html=True)
+
+        _delta = int(w_spd - climate["wind"]["p50"])
+        _delta_str = f"+{_delta}" if _delta >= 0 else str(_delta)
+        _delta_clr = "#ff4b4b" if abs(_delta) >= 8 else "#E58E26" if abs(_delta) >= 4 else "#2abf2a"
+
+        st.markdown(f"""
+        <div style="display:flex;gap:6px;margin-top:10px;">
+            <div style="flex:1;background:#1B1E23;border-radius:6px;padding:7px 8px;text-align:center;">
+                <div style="font-size:0.6rem;color:#5C6370;text-transform:uppercase;letter-spacing:0.3px;">Prevailing</div>
+                <div style="font-size:0.9rem;font-weight:500;color:#D1D5DB;margin-top:2px;">{climate['prevailing_dir']}</div>
+                <div style="font-size:0.6rem;color:#5C6370;margin-top:1px;">{climate['prevailing_pct']:.0f}% of hours</div>
+            </div>
+            <div style="flex:1;background:#1B1E23;border-radius:6px;padding:7px 8px;text-align:center;">
+                <div style="font-size:0.6rem;color:#5C6370;text-transform:uppercase;letter-spacing:0.3px;">Avg Speed</div>
+                <div style="font-size:0.9rem;font-weight:500;color:#D1D5DB;margin-top:2px;">{climate['wind']['p50']:.0f} kt</div>
+                <div style="font-size:0.6rem;color:#5C6370;margin-top:1px;">30-yr {_month_name}</div>
+            </div>
+            <div style="flex:1;background:#1B1E23;border-radius:6px;padding:7px 8px;text-align:center;">
+                <div style="font-size:0.6rem;color:#5C6370;text-transform:uppercase;letter-spacing:0.3px;">Forecast \u0394</div>
+                <div style="font-size:0.9rem;font-weight:500;color:{_delta_clr};margin-top:2px;">{_delta_str} kt</div>
+                <div style="font-size:0.6rem;color:#5C6370;margin-top:1px;">vs normal</div>
+            </div>
+        </div>""", unsafe_allow_html=True)
 
 st.divider()
 
