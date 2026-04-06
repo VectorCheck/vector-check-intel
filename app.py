@@ -11,92 +11,174 @@ import pytz
 import plotly.graph_objects as go
 import tempfile
 from fpdf import FPDF
+from supabase import create_client, Client
 
 # Import Vector Check Modules
-from modules.data_ingest import get_aviation_weather, fetch_mission_data
-from modules.hazard_logic import get_weather_element, calculate_icing_profile, get_turb_ice, apply_tactical_highlights
+from modules.data_ingest    import get_aviation_weather, fetch_mission_data
+from modules.hazard_logic   import get_weather_element, calculate_icing_profile, get_turb_ice, apply_tactical_highlights
 from modules.visualizations import plot_convective_profile
-from modules.telemetry import log_action
-from modules.astronomy import get_astronomical_data
-from modules.space_weather import get_kp_index
+from modules.telemetry      import log_action
+from modules.astronomy      import get_astronomical_data
+from modules.space_weather  import get_kp_index
 
-# --- CONSTANTS & PREFS ---
-CONVECTIVE_CCL_MULTIPLIER = 400
-METERS_TO_SM = 1609.34
-ALL_P_LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150]
-PREFS_FILE = "user_prefs.json"
+# FIX: calc_td and calculate_density_altitude now live exclusively in physics.py.
+# Importing from the single authoritative source eliminates the previous duplicate
+# definition in this file and in visualizations.py.
+from modules.physics import calc_td, calculate_density_altitude, SNOWPACK_BLSN_THRESHOLD_M
+
+# =============================================================================
+# CONSTANTS & PREFERENCES
+# =============================================================================
+CONVECTIVE_CCL_MULTIPLIER          = 400
+METERS_TO_SM                       = 1609.34
+ALL_P_LEVELS                       = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150]
+PREFS_FILE                         = "user_prefs.json"   # JSON fallback only
+PREFS_TABLE                        = "user_preferences"  # Supabase primary store
 
 # DETACHMENT FALLBACK COORDINATES
 USER_DEFAULTS = {
-    "VCAG": {"lat": 44.1628, "lon": -77.3832},     # Belleville, ON
-    "Vector1": {"lat": 54.4642, "lon": -110.1825}, # Cold Lake, AB
-    "Vector2": {"lat": 45.9003, "lon": -77.2818},  # Petawawa, ON
-    "Vector3": {"lat": 48.3303, "lon": -70.9961},  # Bagotville, QC
-    "Vector4": {"lat": 43.6532, "lon": -79.3832}   # Toronto, ON
+    "VCAG":    {"lat": 44.1628, "lon": -77.3832},   # Belleville, ON
+    "Vector1": {"lat": 54.4642, "lon": -110.1825},  # Cold Lake, AB
+    "Vector2": {"lat": 45.9003, "lon": -77.2818},   # Petawawa, ON
+    "Vector3": {"lat": 48.3303, "lon": -70.9961},   # Bagotville, QC
+    "Vector4": {"lat": 43.6532, "lon": -79.3832},   # Toronto, ON
 }
 
-def load_prefs(user):
+# =============================================================================
+# PREFERENCES — SUPABASE-FIRST WITH JSON FALLBACK
+# FIX: Previously written to the ephemeral container filesystem (user_prefs.json),
+# which was wiped on every DigitalOcean App Platform redeploy or restart.
+# Preferences are now persisted to Supabase (user_preferences table) with a
+# graceful fallback to the local JSON file if the DB is unavailable.
+#
+# Required Supabase table (run once in SQL editor):
+#   CREATE TABLE user_preferences (
+#     operator_id TEXT PRIMARY KEY,
+#     lat         FLOAT,  lon  FLOAT,
+#     wind        INT,    ceil INT,   vis FLOAT,
+#     turb        TEXT,   ice  TEXT,
+#     updated_at  TIMESTAMPTZ DEFAULT now()
+#   );
+# =============================================================================
+
+def _get_supabase() -> Client | None:
+    """Returns a Supabase client or None if secrets are unavailable."""
+    try:
+        url = st.secrets["supabase"]["url"]
+        key = st.secrets["supabase"]["key"]
+        return create_client(url, key)
+    except Exception:
+        return None
+
+
+def load_prefs(user: str) -> dict:
+    """Loads operator preferences from Supabase, falling back to local JSON."""
+    # --- Primary: Supabase ---
+    try:
+        sb = _get_supabase()
+        if sb:
+            result = sb.table(PREFS_TABLE).select("*").eq("operator_id", user).execute()
+            if result.data:
+                row = result.data[0]
+                return {
+                    "lat": row.get("lat"), "lon": row.get("lon"),
+                    "wind": row.get("wind"), "ceil": row.get("ceil"),
+                    "vis": row.get("vis"), "turb": row.get("turb"),
+                    "ice": row.get("ice"),
+                }
+    except Exception:
+        pass
+
+    # --- Fallback: Local JSON ---
     if os.path.exists(PREFS_FILE):
         try:
             with open(PREFS_FILE, "r") as f:
                 return json.load(f).get(user, {})
-        except Exception: pass
+        except Exception:
+            pass
+
     return {}
 
-def sanitize_prefs(prefs, user):
-    """Anti-Corruption Gate: Scrubs poisoned memory states and enforces user-specific baselines."""
-    base_loc = USER_DEFAULTS.get(user, {"lat": 44.1628, "lon": -77.3832})
-    def_lat, def_lon = base_loc["lat"], base_loc["lon"]
-    
-    try: lat = float(prefs.get('lat', def_lat))
-    except: lat = def_lat
-    try: lon = float(prefs.get('lon', def_lon))
-    except: lon = def_lon
-    try: wind = int(prefs.get('wind', 30))
-    except: wind = 30
-    try: ceil = int(prefs.get('ceil', 500))
-    except: ceil = 500
-    try: vis = float(prefs.get('vis', 3.0))
-    except: vis = 3.0
-    
-    turb = str(prefs.get('turb', "MOD"))
-    ice = str(prefs.get('ice', "NIL"))
-    
-    if lat == 0.0 or lon == 0.0:
-        lat, lon = def_lat, def_lon
-    if wind == 0 and ceil == 0:
-        wind, ceil, vis = 30, 500, 3.0
-        
-    return lat, lon, wind, ceil, vis, turb, ice
 
-def save_prefs(user, lat, lon, wind, ceil, vis, turb, ice):
-    prefs = {}
+def save_prefs(user: str, lat, lon, wind, ceil, vis, turb, ice) -> None:
+    """Persists operator preferences to Supabase, falling back to local JSON."""
+    payload = {
+        "operator_id": user,
+        "lat":  float(lat),  "lon":  float(lon),
+        "wind": int(wind),   "ceil": int(ceil),
+        "vis":  float(vis),  "turb": str(turb),
+        "ice":  str(ice),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # --- Primary: Supabase upsert ---
+    try:
+        sb = _get_supabase()
+        if sb:
+            sb.table(PREFS_TABLE).upsert(payload).execute()
+            return
+    except Exception:
+        pass
+
+    # --- Fallback: Local JSON ---
+    prefs: dict = {}
     if os.path.exists(PREFS_FILE):
         try:
             with open(PREFS_FILE, "r") as f:
                 prefs = json.load(f)
-        except Exception: pass
-    
+        except Exception:
+            pass
+
     prefs[user] = {
         "lat": float(lat), "lon": float(lon),
-        "wind": int(wind), "ceil": int(ceil), "vis": float(vis),
-        "turb": turb, "ice": ice
+        "wind": int(wind), "ceil": int(ceil),
+        "vis": float(vis), "turb": turb, "ice": ice,
     }
-    
     try:
         with open(PREFS_FILE, "w") as f:
             json.dump(prefs, f)
-    except Exception: pass
+    except Exception:
+        pass
 
+
+def sanitize_prefs(prefs: dict, user: str) -> tuple:
+    """Anti-Corruption Gate: Scrubs poisoned memory states and enforces user-specific baselines."""
+    base_loc = USER_DEFAULTS.get(user, {"lat": 44.1628, "lon": -77.3832})
+    def_lat, def_lon = base_loc["lat"], base_loc["lon"]
+
+    try:    lat  = float(prefs.get('lat',  def_lat))
+    except: lat  = def_lat
+    try:    lon  = float(prefs.get('lon',  def_lon))
+    except: lon  = def_lon
+    try:    wind = int(prefs.get('wind', 30))
+    except: wind = 30
+    try:    ceil = int(prefs.get('ceil', 500))
+    except: ceil = 500
+    try:    vis  = float(prefs.get('vis', 3.0))
+    except: vis  = 3.0
+
+    turb = str(prefs.get('turb', "MOD"))
+    ice  = str(prefs.get('ice',  "NIL"))
+
+    if lat == 0.0 or lon == 0.0:
+        lat, lon = def_lat, def_lon
+    if wind == 0 and ceil == 0:
+        wind, ceil, vis = 30, 500, 3.0
+
+    return lat, lon, wind, ceil, vis, turb, ice
+
+
+# =============================================================================
 # 1. PAGE CONFIG & CSS
+# =============================================================================
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.2rem !important; color: #E58E26 !important; }
     [data-testid="stMetricLabel"] { font-size: 0.8rem !important; color: #A0A4AB !important; text-transform: uppercase; }
-    .ifr-text { color: #ff4b4b; font-weight: bold; }
+    .ifr-text  { color: #ff4b4b; font-weight: bold; }
     .mvfr-text { color: inherit !important; font-weight: inherit !important; }
-    .fz-warn { background-color: #ff4b4b; color: white; padding: 2px; border-radius: 3px; font-weight: bold; }
+    .fz-warn   { background-color: #ff4b4b; color: white; padding: 2px; border-radius: 3px; font-weight: bold; }
     table { margin-left: auto; margin-right: auto; text-align: center !important; width: 90%; border-collapse: collapse; background-color: #1B1E23; }
     th { text-align: center !important; color: #8E949E !important; font-weight: bold !important; padding: 10px !important; border-bottom: 2px solid #3E444E !important; text-transform: uppercase; }
     td { text-align: center !important; padding: 8px !important; color: #D1D5DB !important; border-bottom: 1px solid #2D3139 !important; }
@@ -105,8 +187,11 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+
+# =============================================================================
 # 2. ZERO-COST AUTHENTICATION & LEGAL GATEWAY
-def check_password():
+# =============================================================================
+def check_password() -> bool:
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
     if "eula_accepted" not in st.session_state:
@@ -118,9 +203,8 @@ def check_password():
     st.title("Vector Check Aerial Group Inc.")
     st.caption("Atmospheric Risk Management System - Restricted Access")
     st.divider()
-
     st.subheader("End User License Agreement & Proprietary Rights")
-    
+
     eula_text = """
 <div style="color: #A0A4AB; font-size: 0.85rem; line-height: 1.5; margin-bottom: 20px; height: 250px; overflow-y: scroll; padding: 15px; border: 1px solid #3E444E; background-color: #15171A; border-radius: 5px;">
 <strong>1. UNAUTHORIZED FOR PRIMARY DECISION MAKING (NOT A CERTIFIED BRIEFING)</strong><br>
@@ -146,147 +230,141 @@ This Agreement shall be governed by and construed in accordance with the laws of
 </div>
     """
     st.markdown(eula_text, unsafe_allow_html=True)
-    
     st.subheader("Operator Authentication")
-    
+
     with st.form("login_form"):
         eula_check = st.checkbox("I confirm I am the Pilot in Command (PIC) and I accept the terms of this End User License Agreement.")
         st.markdown("<br>", unsafe_allow_html=True)
-        
         user = st.text_input("Operator ID")
-        pwd = st.text_input("Passcode", type="password")
+        pwd  = st.text_input("Passcode", type="password")
         submitted = st.form_submit_button("Acknowledge & Authenticate")
-        
+
         if submitted:
             if user in st.secrets.get("passwords", {}) and pwd == st.secrets["passwords"][user]:
                 if not eula_check:
                     st.error("⚠️ REGULATORY HALT: You must accept the End User License Agreement to authenticate.")
                 else:
                     st.session_state["password_correct"] = True
-                    st.session_state["eula_accepted"] = True
-                    st.session_state["active_operator"] = user
-                    
+                    st.session_state["eula_accepted"]    = True
+                    st.session_state["active_operator"]  = user
+
                     raw_prefs = load_prefs(user)
                     lat, lon, wind, ceil, vis, turb, ice = sanitize_prefs(raw_prefs, user)
-                    
-                    st.session_state['input_lat'] = lat
-                    st.session_state['input_lon'] = lon
+
+                    st.session_state['input_lat']  = lat
+                    st.session_state['input_lon']  = lon
                     st.session_state['input_wind'] = wind
                     st.session_state['input_ceil'] = ceil
-                    st.session_state['input_vis'] = vis
+                    st.session_state['input_vis']  = vis
                     st.session_state['input_turb'] = turb
-                    st.session_state['input_ice'] = ice
-                    
+                    st.session_state['input_ice']  = ice
+
                     try: log_action(user, 0.0, 0.0, "SYS", "AUTH_AND_EULA_SUCCESS")
                     except: pass
                     st.rerun()
             else:
                 st.error("⚠️ UNAUTHORIZED: Invalid Operator ID or Passcode.")
-                
+
     return False
+
 
 if not check_password():
     st.stop()
 
 if "input_lat" not in st.session_state:
     current_op = st.session_state.get("active_operator", "UNKNOWN")
-    raw_prefs = load_prefs(current_op)
+    raw_prefs  = load_prefs(current_op)
     san_lat, san_lon, san_wind, san_ceil, san_vis, san_turb, san_ice = sanitize_prefs(raw_prefs, current_op)
-    st.session_state['input_lat'] = san_lat
-    st.session_state['input_lon'] = san_lon
+    st.session_state['input_lat']  = san_lat
+    st.session_state['input_lon']  = san_lon
     st.session_state['input_wind'] = san_wind
     st.session_state['input_ceil'] = san_ceil
-    st.session_state['input_vis'] = san_vis
+    st.session_state['input_vis']  = san_vis
     st.session_state['input_turb'] = san_turb
-    st.session_state['input_ice'] = san_ice
+    st.session_state['input_ice']  = san_ice
 
-# ---------------------------------------------------------
-# HELPER FUNCTIONS 
-# ---------------------------------------------------------
-def calc_td(t, rh):
-    if rh <= 0: return t
-    a = 17.625
-    b = 243.04
-    alpha = math.log(rh / 100.0) + ((a * t) / (b + t))
-    return (b * alpha) / (a - alpha)
 
-def calculate_density_altitude(elevation_ft, temp_c, station_pressure_hpa):
-    pa = elevation_ft + 27.288 * (1013.25 - station_pressure_hpa)
-    isa_t = 15.0 - (1.98 * (elevation_ft / 1000.0))
-    da = pa + 118.8 * (temp_c - isa_t)
-    return int(da)
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
 
-def get_interp_thermals(alt_msl, profile):
+def get_interp_thermals(alt_msl: float, profile: list) -> tuple:
     if not profile: return 0.0, 0
-    if alt_msl <= profile[0]['h']: return profile[0]['t'], profile[0]['rh']
+    if alt_msl <= profile[0]['h']:  return profile[0]['t'], profile[0]['rh']
     if alt_msl >= profile[-1]['h']: return profile[-1]['t'], profile[-1]['rh']
-    for i in range(len(profile)-1):
-        if profile[i]['h'] <= alt_msl <= profile[i+1]['h']:
-            lower = profile[i]
-            upper = profile[i+1]
-            frac = (alt_msl - lower['h']) / (upper['h'] - lower['h']) if upper['h'] != lower['h'] else 0
-            i_t = lower['t'] + frac * (upper['t'] - lower['t'])
-            i_rh = lower['rh'] + frac * (upper['rh'] - lower['rh'])
+    for k in range(len(profile) - 1):
+        if profile[k]['h'] <= alt_msl <= profile[k + 1]['h']:
+            lower = profile[k]
+            upper = profile[k + 1]
+            frac  = (alt_msl - lower['h']) / (upper['h'] - lower['h']) if upper['h'] != lower['h'] else 0
+            i_t   = lower['t']  + frac * (upper['t']  - lower['t'])
+            i_rh  = lower['rh'] + frac * (upper['rh'] - lower['rh'])
             return i_t, int(i_rh)
     return profile[0]['t'], profile[0]['rh']
 
-def format_dir(d, spd):
+
+def format_dir(d: float, spd: float) -> int:
     r = int(round(float(d), -1)) % 360
     if r == 0 and spd > 0: return 360
-    if spd == 0: return 0
+    if spd == 0:            return 0
     return r
 
-def hazard_lvl(h_str):
+
+def hazard_lvl(h_str: str) -> float:
     h_str = h_str.upper()
-    if "SEV" in h_str: return 3
+    if "SEV"     in h_str: return 3
     if "MOD-SEV" in h_str: return 2.5
-    if "MOD" in h_str: return 2
-    if "LGT" in h_str: return 1
+    if "MOD"     in h_str: return 2
+    if "LGT"     in h_str: return 1
     return 0
 
-def calc_tactical_visibility(vis_raw_m, rh, w_spd, wx):
+
+def calc_tactical_visibility(vis_raw_m, rh: int, w_spd: float, wx: int) -> float:
     if vis_raw_m is not None:
         vis_sm = float(vis_raw_m) / 1609.34
     else:
-        if rh >= 95: vis_sm = 1.5
+        if rh >= 95:   vis_sm = 1.5
         elif rh >= 90: vis_sm = 3.0
         elif rh >= 80: vis_sm = 5.0
-        else: vis_sm = 10.0
-        
+        else:          vis_sm = 10.0
+
     if wx >= 50: return vis_sm
 
     if wx in [45, 48] and rh < 85:
         if rh >= 75: return max(vis_sm, 4.0)
-        else: return max(vis_sm, 7.0)
+        else:        return max(vis_sm, 7.0)
 
     if vis_sm < 3.0 and w_spd >= 10.0 and wx not in [45, 48]: return max(vis_sm, 6.0)
-    if vis_sm < 4.0 and rh < 85: return max(vis_sm, 7.0)
-    if vis_sm < 3.0 and wx <= 3 and rh < 95: return max(vis_sm, 4.0)
+    if vis_sm < 4.0 and rh < 85:                               return max(vis_sm, 7.0)
+    if vis_sm < 3.0 and wx <= 3 and rh < 95:                   return max(vis_sm, 4.0)
     return vis_sm
 
-# ---------------------------------------------------------
+
+# =============================================================================
 # SPATIAL ENGINES & CACHED DATA FETCH
-# ---------------------------------------------------------
+# =============================================================================
+
 @st.cache_data(ttl=86400)
-def get_location_name(user_lat, user_lon):
+def get_location_name(user_lat: float, user_lon: float) -> str:
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?lat={user_lat}&lon={user_lon}&format=json"
         req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
-            
-        address = data.get('address', {})
-        region = address.get('city', address.get('town', address.get('county', address.get('village', address.get('region', 'Unknown Region')))))
+
+        address  = data.get('address', {})
+        region   = address.get('city', address.get('town', address.get('county', address.get('village', address.get('region', 'Unknown Region')))))
         province = address.get('state', address.get('country', 'Unknown'))
-        
+
         if region != 'Unknown Region' and province != 'Unknown': return f"{region}, {province}"
         elif province != 'Unknown': return province
         else: return f"Coord: {user_lat:.2f}, {user_lon:.2f}"
-    except Exception: 
-        return f"Coord: {user_lat:.2f}, {user_lon:.2f}" 
+    except Exception:
+        return f"Coord: {user_lat:.2f}, {user_lon:.2f}"
+
 
 @st.cache_data(ttl=3600)
-def get_nearest_icao_station(user_lat, user_lon):
+def get_nearest_icao_station(user_lat: float, user_lon: float) -> dict:
     try:
         min_lat, max_lat = user_lat - 1.0, user_lat + 1.0
         min_lon, max_lon = user_lon - 1.0, user_lon + 1.0
@@ -294,59 +372,300 @@ def get_nearest_icao_station(user_lat, user_lon):
         req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode('utf-8'))
-        
+
         best_station = {"icao": "NONE", "dist": float('inf'), "dir": ""}
-        seen_icaos = set()
-        
+        seen_icaos   = set()
+
         for taf in data:
             if 'icaoId' not in taf or 'lat' not in taf or 'lon' not in taf: continue
             icao_code = taf['icaoId']
             if icao_code in seen_icaos: continue
             seen_icaos.add(icao_code)
-            
+
             stn_lat, stn_lon = float(taf['lat']), float(taf['lon'])
-            R = 6371.0 
-            lat1, lon1 = math.radians(user_lat), math.radians(user_lon)
-            lat2, lon2 = math.radians(stn_lat), math.radians(stn_lon)
-            
-            dlat, dlon = lat2 - lat1, lon2 - lon1
-            a = math.sin(dlat / 2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2)**2
-            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+            R    = 6371.0
+            lat1 = math.radians(user_lat);  lon1 = math.radians(user_lon)
+            lat2 = math.radians(stn_lat);   lon2 = math.radians(stn_lon)
+
+            dlat = lat2 - lat1;  dlon = lon2 - lon1
+            a    = math.sin(dlat / 2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2)**2
+            c    = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
             dist = R * c
-            
+
             if dist <= 50.0 and dist < best_station["dist"]:
-                y = math.sin(dlon) * math.cos(lat2)
-                x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+                y       = math.sin(dlon) * math.cos(lat2)
+                x       = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
                 bearing = (math.degrees(math.atan2(y, x)) + 360) % 360
-                dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+                dirs    = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
                 best_station = {"icao": icao_code, "dist": dist, "dir": dirs[int(round(bearing / 45)) % 8]}
-        
+
         if best_station["icao"] != "NONE": return best_station
-    except Exception: pass
+    except Exception:
+        pass
     return {"icao": "NONE", "dist": None, "dir": ""}
 
+
 @st.cache_data(ttl=900)
-def fetch_weather_payload(fetch_lat, fetch_lon, fetch_model):
+def fetch_weather_payload(fetch_lat: float, fetch_lon: float, fetch_model: str) -> dict:
     return fetch_mission_data(fetch_lat, fetch_lon, fetch_model)
 
+
 @st.cache_data(ttl=900)
-def fetch_metar_taf(fetch_icao):
+def fetch_metar_taf(fetch_icao: str) -> tuple:
     return get_aviation_weather(fetch_icao)
 
+
 @st.cache_data(ttl=10800)
-def fetch_space_weather_cached(dt_iso_str):
+def fetch_space_weather_cached(dt_iso_str: str) -> dict:
     dt_utc = datetime.fromisoformat(dt_iso_str).replace(tzinfo=timezone.utc)
     return get_kp_index(dt_utc)
 
+
 @st.cache_data(ttl=86400)
-def fetch_astronomy_cached(lat_val, lon_val, dt_iso_str, tz_name, tz_abbr_str):
-    dt_utc = datetime.fromisoformat(dt_iso_str).replace(tzinfo=timezone.utc)
+def fetch_astronomy_cached(lat_val: float, lon_val: float, dt_iso_str: str, tz_name: str, tz_abbr_str: str) -> dict:
+    dt_utc   = datetime.fromisoformat(dt_iso_str).replace(tzinfo=timezone.utc)
     local_tz = pytz.timezone(tz_name) if tz_name else timezone.utc
     return get_astronomical_data(lat_val, lon_val, dt_utc, local_tz, tz_abbr_str)
 
-# --- SIDEBAR CONFIGURATION ---
-LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
-try: st.sidebar.image(LOGO_URL, use_container_width=True)
+
+# =============================================================================
+# IMPACT MATRIX — PRECOMPUTED & CACHED
+# FIX: Previously, the full 48-hour atmospheric physics loop ran on EVERY
+# Streamlit rerender (every slider move, every button click, every UI interaction).
+# This function is now @st.cache_data, meaning the 48 full atmospheric column
+# computations only execute when the underlying data payload, operator constraints,
+# or terrain environment actually change. All other rerenders read from cache.
+# =============================================================================
+
+@st.cache_data(ttl=900, show_spinner=False)
+def compute_impact_matrix(
+    h_data:       dict,
+    nearest_idx:  int,
+    max_idx:      int,
+    sfc_elevation: float,
+    k_conv:       float,
+    t_wind:       int,
+    t_ceil:       int,
+    t_vis:        float,
+    t_turb:       str,
+    t_ice:        str,
+    terrain_env:  str,
+    tz_str:       str,
+) -> tuple[list, list, list]:
+    """
+    Evaluates Go/No-Go status for every hour in the 48-hour forecast window.
+
+    Returns:
+        x_labels    — bar chart x-axis labels (e.g. "T12", "T13" …)
+        color_vals  — "#1E8449" (Go) or "#B82E2E" (No-Go) per slot
+        hover_texts — human-readable status string per slot
+    """
+    local_tz_mat = pytz.timezone(tz_str) if tz_str else timezone.utc
+    x_labels:    list = []
+    color_vals:  list = []
+    hover_texts: list = []
+
+    for mat_i in range(nearest_idx, max_idx + 1):
+        failures: list = []
+
+        # --- Surface wind ---
+        w_raw  = h_data.get('wind_speed_10m', [0])[mat_i]
+        w_spd  = (float(w_raw) if w_raw is not None else 0.0) * k_conv
+        sfc_dir_raw = h_data.get('wind_direction_10m', [0])[mat_i]
+        sfc_dir_mat = float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0
+
+        g_raw_list = h_data.get('wind_gusts_10m')
+        g_raw      = (float(g_raw_list[mat_i]) * k_conv) if (g_raw_list and len(g_raw_list) > mat_i and g_raw_list[mat_i] is not None) else w_spd
+        gst        = (w_spd * 1.25) if g_raw <= w_spd else g_raw
+
+        # --- Weather code ---
+        wx_raw = h_data.get('weather_code', [0])
+        wx     = int(wx_raw[mat_i]) if (wx_raw and len(wx_raw) > mat_i and wx_raw[mat_i] is not None) else 0
+
+        # --- Temperature / moisture ---
+        t_temp_raw = h_data.get('temperature_2m', [0])[mat_i]
+        t_temp     = float(t_temp_raw) if t_temp_raw is not None else 0.0
+        rh_raw_mat = h_data.get('relative_humidity_2m', [0])[mat_i]
+        rh_v       = int(rh_raw_mat) if rh_raw_mat is not None else 0
+        td_mat     = calc_td(t_temp, rh_v)
+        sfc_spread = t_temp - td_mat
+
+        # --- Snow depth (metres) — now fetched from API; gate is live ---
+        sn_depth_raw = h_data.get('snow_depth', [0])
+        sn_depth     = float(sn_depth_raw[mat_i]) if sn_depth_raw and len(sn_depth_raw) > mat_i and sn_depth_raw[mat_i] is not None else 0.0
+
+        # --- Visibility ---
+        vis_raw_list = h_data.get('visibility')
+        vis_raw_val  = vis_raw_list[mat_i] if vis_raw_list and len(vis_raw_list) > mat_i else None
+        vis_sm       = calc_tactical_visibility(vis_raw_val, rh_v, w_spd, wx)
+
+        # --- 15-Layer Thermodynamic Column ---
+        profile = [{'h': sfc_elevation, 't': t_temp, 'td': td_mat, 'spread': sfc_spread, 'rh': rh_v}]
+        for p in ALL_P_LEVELS:
+            gh_list = h_data.get(f'geopotential_height_{p}hPa')
+            t_list  = h_data.get(f'temperature_{p}hPa')
+            rh_list = h_data.get(f'relative_humidity_{p}hPa')
+            if gh_list and t_list and rh_list and len(gh_list) > mat_i:
+                if gh_list[mat_i] is not None and t_list[mat_i] is not None and rh_list[mat_i] is not None:
+                    p_gh = float(gh_list[mat_i]) * 3.28084
+                    if p_gh > profile[-1]['h']:
+                        p_t  = float(t_list[mat_i])
+                        p_rh = int(rh_list[mat_i])
+                        p_td = calc_td(p_t, p_rh)
+                        profile.append({'h': p_gh, 't': p_t, 'td': p_td, 'spread': p_t - p_td, 'rh': p_rh})
+
+        # --- Convective assessment ---
+        t_950_list = h_data.get('temperature_925hPa')
+        t_950      = float(t_950_list[mat_i]) if (t_950_list and len(t_950_list) > mat_i and t_950_list[mat_i] is not None) else t_temp
+        is_convective = (wx >= 80) or ((t_temp - t_950) >= 7.5 and t_temp >= 10.0)
+
+        precip_raw_top = h_data.get('precipitation', [0])
+        precip_val_top = float(precip_raw_top[mat_i]) if precip_raw_top and len(precip_raw_top) > mat_i and precip_raw_top[mat_i] is not None else 0.0
+
+        # --- Cloud depth scan ---
+        cb_v = ct_v = None
+        for layer in profile:
+            if layer['spread'] <= 4.0:
+                if cb_v is None: cb_v = layer['h']
+                ct_v = layer['h']
+        c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
+
+        # --- Thermal Phase Gate (Precipitation Veto) ---
+        if 50 <= wx <= 59 and (c_depth >= 2500 or precip_val_top >= 0.5 or is_convective):
+            frz_raw_list_mat = h_data.get('freezing_level_height')
+            frz_raw_mat      = float(frz_raw_list_mat[mat_i]) if frz_raw_list_mat and len(frz_raw_list_mat) > mat_i and frz_raw_list_mat[mat_i] is not None else 0.0
+            frz_agl_mat      = max(0, (frz_raw_mat * 3.28084) - sfc_elevation)
+
+            warm_nose = any(layer['t'] > 0 for layer in profile[1:])
+            is_heavy  = wx in [54, 55, 57]
+
+            if t_temp <= 0:
+                wx = (67 if is_heavy else 66) if warm_nose else (73 if is_heavy else 71)
+            elif 0 < t_temp <= 2.5 and frz_agl_mat < 1500:
+                wx = 69 if is_heavy else 68
+            else:
+                wx = 63 if is_heavy else 61
+
+        # --- BLSN / DRSN Kinetic Split ---
+        is_snowing   = wx in [71, 73, 75, 77, 85, 86, 68, 69]
+        is_cold_snow = t_temp <= -5.0
+        has_snowpack = sn_depth >= SNOWPACK_BLSN_THRESHOLD_M  # 5 cm threshold
+
+        blsn_trigger = False
+        if is_cold_snow:
+            if is_snowing:
+                if w_spd >= 20.0 or gst >= 30.0:
+                    blsn_trigger = True
+            elif has_snowpack:
+                if w_spd >= 25.0 or gst >= 35.0:
+                    blsn_trigger = True
+
+        if blsn_trigger and vis_sm > 4.0:
+            vis_sm = max(1.5, vis_sm * 0.5)
+
+        # --- Cloud base cascade ---
+        c_base_agl = 99999
+        c_amt      = "CLR"
+
+        search_profile = profile[1:] if len(profile) > 1 else profile
+
+        for layer in search_profile:
+            h_agl = max(0, layer['h'] - sfc_elevation)
+            if layer['spread'] <= 3.0:
+                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+                c_base_agl = int(round(h_agl, -2))
+                c_amt      = "OVC" if layer['spread'] <= 1.0 else "BKN"
+                if c_base_agl == 0:
+                    if vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
+                    else:                                      c_amt      = "VV"
+                break
+
+        if c_amt == "CLR":
+            for layer in search_profile:
+                h_agl = max(0, layer['h'] - sfc_elevation)
+                if layer['spread'] <= 5.0:
+                    if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+                    c_base_agl = int(round(h_agl, -2))
+                    c_amt      = "SCT"
+                    if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
+                    break
+
+        if c_amt == "CLR":
+            for layer in search_profile:
+                h_agl = max(0, layer['h'] - sfc_elevation)
+                if layer['spread'] <= 7.0:
+                    if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+                    c_base_agl = int(round(h_agl, -2))
+                    c_amt      = "FEW"
+                    if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
+                    break
+
+        if is_convective and c_amt == "CLR":
+            ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
+            if ccl_base < 10000:
+                c_base_agl = ccl_base
+                c_amt      = "BKN" if wx >= 80 else "SCT"
+
+        # --- 400ft AGL hazard evaluation ---
+        alt_msl    = sfc_elevation + 400
+        alt_t, alt_rh = get_interp_thermals(alt_msl, profile)
+        icing_cond    = calculate_icing_profile(h_data, mat_i, wx)
+
+        w_120_list = h_data.get('wind_speed_120m')
+        w_120_val  = w_120_list[mat_i] if w_120_list and len(w_120_list) > mat_i else None
+
+        if w_120_val is not None:
+            s_c = float(w_120_val) * k_conv
+        else:
+            u_v_list = h_data.get('wind_speed_1000hPa')
+            if u_v_list and len(u_v_list) > mat_i and u_v_list[mat_i] is not None:
+                u_v_mat = float(u_v_list[mat_i]) * k_conv
+                u_h_list = h_data.get('geopotential_height_1000hPa')
+                u_h_mat  = float(u_h_list[mat_i]) if (u_h_list and len(u_h_list) > mat_i and u_h_list[mat_i] is not None) else 110.0
+            else:
+                u_v_mat, u_h_mat = w_spd, 10.0
+            s_c = w_spd + (u_v_mat - w_spd) * (math.log(max(1, 400 * 0.3048) / 10) / math.log(max(1.1, u_h_mat / 10)))
+
+        g_c       = s_c + max(0, gst - w_spd)
+        turb, ice = get_turb_ice(400, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
+
+        # --- Go / No-Go decision ---
+        max_wind_val = max(w_spd, gst)
+        if max_wind_val > t_wind:                                  failures.append(f"Wind ({int(max_wind_val)}KT)")
+        if vis_sm < t_vis:                                         failures.append(f"Vis ({vis_sm:.1f}SM)")
+        if c_base_agl < t_ceil and c_amt in ["BKN", "OVC", "VV"]: failures.append(f"Ceil ({c_base_agl}ft)")
+        if hazard_lvl(turb) > hazard_lvl(t_turb):                 failures.append(f"Turb ({turb})")
+        if hazard_lvl(ice)  > hazard_lvl(t_ice):                  failures.append(f"Ice ({ice})")
+
+        dt_local = datetime.fromisoformat(h_data["time"][mat_i]).replace(tzinfo=timezone.utc).astimezone(local_tz_mat)
+        time_str = dt_local.strftime('%H:%M')
+
+        x_labels.append(f"T{mat_i}")
+
+        if not failures:
+            color_vals.append("#1E8449")
+            hover_texts.append(f"{time_str} | FLIGHT AUTHORIZED")
+        else:
+            color_vals.append("#B82E2E")
+            hover_texts.append(f"{time_str} | " + ", ".join(failures))
+
+    return x_labels, color_vals, hover_texts
+
+
+# =============================================================================
+# SIDEBAR CONFIGURATION
+# =============================================================================
+
+# FIX: Logo now served from the local bundled asset instead of a hardcoded
+# raw GitHub URL, which breaks if the repo moves, renames, or goes private.
+LOGO_LOCAL = "VCAG_Inc_-_Logo_Final.png"
+LOGO_URL   = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
+
+try:
+    if os.path.exists(LOGO_LOCAL):
+        st.sidebar.image(LOGO_LOCAL, use_container_width=True)
+    else:
+        st.sidebar.image(LOGO_URL, use_container_width=True)
 except Exception:
     st.sidebar.title("Vector Check")
     st.sidebar.caption("Aerial Group Inc.")
@@ -357,7 +676,7 @@ st.sidebar.header("Mission Parameters")
 s_lat = st.session_state.get('input_lat', 44.1628)
 s_lon = st.session_state.get('input_lon', -77.3832)
 
-lat = st.sidebar.number_input("Latitude", value=float(s_lat), format="%.4f")
+lat = st.sidebar.number_input("Latitude",  value=float(s_lat), format="%.4f")
 lon = st.sidebar.number_input("Longitude", value=float(s_lon), format="%.4f")
 
 st.session_state['input_lat'] = lat
@@ -367,9 +686,9 @@ regional_name = get_location_name(lat, lon)
 st.sidebar.markdown(f"<div style='color: #8E949E; font-size: 0.9rem; margin-top: -10px; margin-bottom: 20px;'>{regional_name}</div>", unsafe_allow_html=True)
 
 station_data = get_nearest_icao_station(lat, lon)
-icao = station_data["icao"]
+icao     = station_data["icao"]
 stn_dist = station_data["dist"]
-stn_dir = station_data["dir"]
+stn_dir  = station_data["dir"]
 
 st.sidebar.text_input("Nearest Valid ICAO (Auto-Locked)", value=(icao if icao != "NONE" else "N/A"), disabled=True)
 if icao == "NONE":
@@ -378,22 +697,24 @@ if icao == "NONE":
 terrain_env = st.sidebar.selectbox("Terrain Environment:", options=["Land", "Water", "Mountains", "Urban"])
 model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
 
+
 def log_refresh_callback():
     st.cache_data.clear()
     try: log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "MANUAL_REFRESH")
-    except Exception: pass 
+    except Exception: pass
+
 
 st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 
 model_api_map = {
     "HRDPS (Canada 2.5km)": "https://api.open-meteo.com/v1/gem",
-    "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/forecast" 
+    "ECMWF (Global 9km)":   "https://api.open-meteo.com/v1/forecast",
 }
 
 data = fetch_weather_payload(lat, lon, model_api_map[model_choice])
 
 if icao != "NONE": metar_raw, taf_raw = fetch_metar_taf(icao)
-else: metar_raw, taf_raw = "NIL", "NIL"
+else:              metar_raw, taf_raw = "NIL", "NIL"
 
 st.title("Atmospheric Risk Management")
 st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.session_state.get('active_operator', 'UNKNOWN')}")
@@ -409,263 +730,107 @@ elif "hourly" not in data:
     st.error("⚠️ CRITICAL: Malformed data payload received from server.")
     st.stop()
 
-# --- TIME PARSING ---
-tf = TimezoneFinder()
+
+# =============================================================================
+# TIME PARSING
+# =============================================================================
+tf     = TimezoneFinder()
 tz_str = tf.timezone_at(lng=lon, lat=lat)
 local_tz = pytz.timezone(tz_str) if tz_str else timezone.utc
-tz_abbr = datetime.now(local_tz).tzname() if tz_str else "UTC"
+tz_abbr  = datetime.now(local_tz).tzname() if tz_str else "UTC"
 
-h = data["hourly"]
-is_kmh = "km/h" in data.get("hourly_units", {}).get("wind_speed_10m", "km/h").lower()
-k_conv = 0.539957 if is_kmh else 1.0
-raw_wind_unit = "KT"
-sfc_elevation = data.get('elevation', 0) * 3.28084
+h         = data["hourly"]
+is_kmh    = "km/h" in data.get("hourly_units", {}).get("wind_speed_10m", "km/h").lower()
+k_conv    = 0.539957 if is_kmh else 1.0
+raw_wind_unit  = "KT"
+sfc_elevation  = data.get('elevation', 0) * 3.28084
 
 times_display = []
-for t in h["time"]:
-    dt_u = datetime.fromisoformat(t).replace(tzinfo=timezone.utc)
+for t_str in h["time"]:
+    dt_u = datetime.fromisoformat(t_str).replace(tzinfo=timezone.utc)
     dt_l = dt_u.astimezone(local_tz)
     times_display.append(f"{dt_u.strftime('%d %b %H:%M')} Z | {dt_l.strftime('%H:%M')} {tz_abbr}")
-    
-now_utc = datetime.now(timezone.utc)
-time_diffs = [abs((datetime.fromisoformat(t).replace(tzinfo=timezone.utc) - now_utc).total_seconds()) for t in h["time"]]
-nearest_idx = time_diffs.index(min(time_diffs))
-max_idx = min(len(h["time"]) - 1, nearest_idx + 48)
+
+now_utc      = datetime.now(timezone.utc)
+time_diffs   = [abs((datetime.fromisoformat(t).replace(tzinfo=timezone.utc) - now_utc).total_seconds()) for t in h["time"]]
+nearest_idx  = time_diffs.index(min(time_diffs))
+max_idx      = min(len(h["time"]) - 1, nearest_idx + 48)
 valid_times_display = times_display[nearest_idx : max_idx + 1]
 
 if "forecast_slider" not in st.session_state or st.session_state.forecast_slider not in valid_times_display:
     st.session_state.forecast_slider = valid_times_display[0]
 
-# ---------------------------------------------------------
-# INTERACTIVE IMPACT MATRIX UI & LOGIC
-# ---------------------------------------------------------
+
+# =============================================================================
+# IMPACT MATRIX UI
+# =============================================================================
 st.subheader("Impact Matrix")
 
 with st.expander("Configure Operational Constraints"):
     tc1, tc2, tc3, tc4, tc5 = st.columns(5)
-    
+
     s_wind = st.session_state.get('input_wind', 30)
     s_ceil = st.session_state.get('input_ceil', 500)
-    s_vis = st.session_state.get('input_vis', 3.0)
-    
-    t_wind = tc1.number_input("Max Wind/Gust (KT)", value=int(s_wind))
+    s_vis  = st.session_state.get('input_vis',  3.0)
+
+    t_wind = tc1.number_input("Max Wind/Gust (KT)",  value=int(s_wind))
     t_ceil = tc2.number_input("Min Ceiling (ft AGL)", value=int(s_ceil), step=100)
-    t_vis = tc3.number_input("Min Vis (SM)", value=float(s_vis), step=0.5)
-    
-    turb_idx = ["NIL", "LGT", "MOD", "SEV"].index(st.session_state.get('input_turb', 'MOD')) if st.session_state.get('input_turb', 'MOD') in ["NIL", "LGT", "MOD", "SEV"] else 2
-    ice_idx = ["NIL", "LGT", "MOD", "SEV"].index(st.session_state.get('input_ice', 'NIL')) if st.session_state.get('input_ice', 'NIL') in ["NIL", "LGT", "MOD", "SEV"] else 0
-    
-    t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=turb_idx)
-    t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=ice_idx)
-    
+    t_vis  = tc3.number_input("Min Vis (SM)",          value=float(s_vis), step=0.5)
+
+    turb_opts = ["NIL", "LGT", "MOD", "SEV"]
+    ice_opts  = ["NIL", "LGT", "MOD", "SEV"]
+    turb_idx  = turb_opts.index(st.session_state.get('input_turb', 'MOD')) if st.session_state.get('input_turb', 'MOD') in turb_opts else 2
+    ice_idx   = ice_opts.index(st.session_state.get('input_ice',  'NIL')) if st.session_state.get('input_ice',  'NIL') in ice_opts  else 0
+
+    t_turb = tc4.selectbox("Max Turb",  turb_opts, index=turb_idx)
+    t_ice  = tc5.selectbox("Max Icing", ice_opts,  index=ice_idx)
+
     st.session_state['input_wind'] = t_wind
     st.session_state['input_ceil'] = t_ceil
-    st.session_state['input_vis'] = t_vis
+    st.session_state['input_vis']  = t_vis
     st.session_state['input_turb'] = t_turb
-    st.session_state['input_ice'] = t_ice
+    st.session_state['input_ice']  = t_ice
 
-x_labels = []      
-hover_texts = []   
-color_vals = []    
+# Run the cached physics computation — only re-executes when inputs change
+x_labels, color_vals, hover_texts = compute_impact_matrix(
+    h_data        = h,
+    nearest_idx   = nearest_idx,
+    max_idx       = max_idx,
+    sfc_elevation = sfc_elevation,
+    k_conv        = k_conv,
+    t_wind        = t_wind,
+    t_ceil        = t_ceil,
+    t_vis         = t_vis,
+    t_turb        = t_turb,
+    t_ice         = t_ice,
+    terrain_env   = terrain_env,
+    tz_str        = tz_str or "UTC",
+)
 
-for i in range(nearest_idx, max_idx + 1):
-    failures = []
-    
-    w_raw = h.get('wind_speed_10m', [0])[i]
-    w_spd = (float(w_raw) if w_raw is not None else 0.0) * k_conv
-    sfc_dir = float(h.get('wind_direction_10m', [0])[i]) if h.get('wind_direction_10m', [0])[i] is not None else 0.0
-    
-    g_raw_list = h.get('wind_gusts_10m')
-    g_raw = (float(g_raw_list[i]) * k_conv) if (g_raw_list and len(g_raw_list) > i and g_raw_list[i] is not None) else w_spd
-    gst = (w_spd * 1.25) if g_raw <= w_spd else g_raw
-    wx_raw = h.get('weather_code', [0])
-    wx = int(wx_raw[i]) if (wx_raw and len(wx_raw) > i and wx_raw[i] is not None) else 0
-    
-    t_temp_raw = h.get('temperature_2m', [0])[i]
-    t_temp = float(t_temp_raw) if t_temp_raw is not None else 0.0
-    rh_v = int(h.get('relative_humidity_2m', [0])[i]) if h.get('relative_humidity_2m', [0])[i] is not None else 0
-    td = calc_td(t_temp, rh_v)
-    sfc_spread = t_temp - td
-    
-    sn_depth_raw = h.get('snow_depth', [0])
-    sn_depth = float(sn_depth_raw[i]) if sn_depth_raw and len(sn_depth_raw) > i and sn_depth_raw[i] is not None else 0.0
-    
-    vis_raw_list = h.get('visibility')
-    vis_raw_val = vis_raw_list[i] if vis_raw_list and len(vis_raw_list) > i else None
-    vis_sm = calc_tactical_visibility(vis_raw_val, rh_v, w_spd, wx)
-    
-    profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh_v}]
-    for p in ALL_P_LEVELS:
-        gh_list = h.get(f'geopotential_height_{p}hPa')
-        t_list = h.get(f'temperature_{p}hPa')
-        rh_list = h.get(f'relative_humidity_{p}hPa')
-        if gh_list and t_list and rh_list and len(gh_list) > i:
-            if gh_list[i] is not None and t_list[i] is not None and rh_list[i] is not None:
-                p_gh = float(gh_list[i]) * 3.28084
-                if p_gh > profile[-1]['h']:
-                    profile.append({'h': p_gh, 't': float(t_list[i]), 'td': calc_td(float(t_list[i]), int(rh_list[i])), 'spread': float(t_list[i]) - calc_td(float(t_list[i]), int(rh_list[i])), 'rh': int(rh_list[i])})
-
-    t_950_list = h.get('temperature_925hPa')
-    t_950 = float(t_950_list[i]) if (t_950_list and len(t_950_list) > i and t_950_list[i] is not None) else t_temp
-    lapse_rate_temp_drop = t_temp - t_950
-    is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
-    
-    precip_raw_top = h.get('precipitation', [0])
-    precip_val_top = float(precip_raw_top[i]) if precip_raw_top and len(precip_raw_top) > i and precip_raw_top[i] is not None else 0.0
-
-    cb_v = None
-    ct_v = None
-    for layer in profile:
-        if layer['spread'] <= 4.0: 
-            if cb_v is None: cb_v = layer['h']
-            ct_v = layer['h']
-    c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
-
-    if 50 <= wx <= 59 and (c_depth >= 2500 or precip_val_top >= 0.5 or is_convective):
-        frz_raw_list_mat = h.get('freezing_level_height')
-        frz_raw_mat = float(frz_raw_list_mat[i]) if frz_raw_list_mat and len(frz_raw_list_mat) > i and frz_raw_list_mat[i] is not None else 0.0
-        frz_agl_mat = max(0, (frz_raw_mat * 3.28084) - sfc_elevation)
-
-        warm_nose = any(layer['t'] > 0 for layer in profile[1:])
-        is_heavy = wx in [54, 55, 57]
-        
-        if t_temp <= 0:
-            wx = (67 if is_heavy else 66) if warm_nose else (73 if is_heavy else 71)
-        elif 0 < t_temp <= 2.5 and frz_agl_mat < 1500:
-            wx = 69 if is_heavy else 68
-        else:
-            wx = 63 if is_heavy else 61
-            
-    # RECALIBRATED BLSN/DRSN KINETIC SPLIT FOR MATRIX
-    is_snowing = wx in [71, 73, 75, 77, 85, 86, 68, 69]
-    is_cold_snow = t_temp <= -5.0
-    has_snowpack = sn_depth >= 0.05 
-
-    blsn_trigger = False
-    
-    if is_cold_snow:
-        if is_snowing:
-            if w_spd >= 20.0 or gst >= 30.0:
-                blsn_trigger = True
-        elif has_snowpack:
-            if w_spd >= 25.0 or gst >= 35.0:
-                blsn_trigger = True
-
-    if blsn_trigger:
-        if vis_sm > 4.0: vis_sm = max(1.5, vis_sm * 0.5)
-        
-    c_base_agl = 99999 
-    c_amt = "CLR"
-    
-    search_profile = profile[1:] if len(profile) > 1 else profile
-    for layer in search_profile:
-        h_agl = max(0, layer['h'] - sfc_elevation)
-        if layer['spread'] <= 3.0: 
-            if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
-            
-            c_base_agl = int(round(h_agl, -2))
-            c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
-            
-            if c_base_agl == 0:
-                if vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
-                else: c_amt = "VV"
-            break
-            
-    if c_amt == "CLR":
-        for layer in search_profile:
-            h_agl = max(0, layer['h'] - sfc_elevation)
-            if layer['spread'] <= 5.0:
-                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
-                c_base_agl = int(round(h_agl, -2))
-                c_amt = "SCT"
-                if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
-                break
-                
-    if c_amt == "CLR":
-        for layer in search_profile:
-            h_agl = max(0, layer['h'] - sfc_elevation)
-            if layer['spread'] <= 7.0:
-                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
-                c_base_agl = int(round(h_agl, -2))
-                c_amt = "FEW"
-                if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
-                break
-
-    if is_convective and c_amt == "CLR":
-        ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
-        if ccl_base < 10000:
-            c_base_agl = ccl_base
-            c_amt = "BKN" if wx >= 80 else "SCT"
-
-    alt_msl = sfc_elevation + 400
-    alt_t, alt_rh = get_interp_thermals(alt_msl, profile)
-    icing_cond = calculate_icing_profile(h, i, wx)
-    
-    w_120_list = h.get('wind_speed_120m')
-    w_120_val = w_120_list[i] if w_120_list and len(w_120_list) > i else None
-    
-    if w_120_val is not None:
-        s_c = float(w_120_val) * k_conv
-    else:
-        u_v_list = h.get('wind_speed_1000hPa')
-        if u_v_list and len(u_v_list) > i and u_v_list[i] is not None:
-            u_v = float(u_v_list[i]) * k_conv
-            u_h_list = h.get('geopotential_height_1000hPa')
-            u_h = float(u_h_list[i]) if (u_h_list and len(u_h_list) > i and u_h_list[i] is not None) else 110.0
-        else:
-            u_v, u_h = w_spd, 10.0
-        s_c = w_spd + (u_v - w_spd) * (math.log(max(1, 400*0.3048)/10) / math.log(max(1.1, u_h/10)))
-        
-    g_c = s_c + max(0, gst - w_spd)
-    turb, ice = get_turb_ice(400, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
-
-    max_wind_val = max(w_spd, gst)
-    if max_wind_val > t_wind: failures.append(f"Wind ({int(max_wind_val)}KT)")
-    if vis_sm < t_vis: failures.append(f"Vis ({vis_sm:.1f}SM)")
-    if c_base_agl < t_ceil and c_amt in ["BKN", "OVC", "VV"]: 
-        failures.append(f"Ceil ({c_base_agl}ft)")
-        
-    if hazard_lvl(turb) > hazard_lvl(t_turb): failures.append(f"Turb ({turb})")
-    if hazard_lvl(ice) > hazard_lvl(t_ice): failures.append(f"Ice ({ice})")
-    
-    dt_local = datetime.fromisoformat(h["time"][i]).replace(tzinfo=timezone.utc).astimezone(local_tz)
-    time_str = dt_local.strftime('%H:%M')
-    
-    x_labels.append(f"T{i}") 
-    
-    if len(failures) == 0:
-        color_vals.append("#1E8449") 
-        hover_texts.append(f"{time_str} | FLIGHT AUTHORIZED")
-    else:
-        color_vals.append("#B82E2E") 
-        hover_texts.append(f"{time_str} | " + ", ".join(failures))
-
-tick_vals = x_labels[::4]
+tick_vals  = x_labels[::4]
 tick_texts = []
-
 for val in tick_vals:
-    idx_for_val = nearest_idx + x_labels.index(val)
-    dt_local = datetime.fromisoformat(h["time"][idx_for_val]).replace(tzinfo=timezone.utc).astimezone(local_tz)
-    t_str = dt_local.strftime('%H:%M')
-    tick_texts.append(t_str)
+    tick_idx    = nearest_idx + x_labels.index(val)
+    dt_local_tk = datetime.fromisoformat(h["time"][tick_idx]).replace(tzinfo=timezone.utc).astimezone(local_tz)
+    tick_texts.append(dt_local_tk.strftime('%H:%M'))
 
-fig = go.Figure(data=go.Bar(
+fig_matrix = go.Figure(data=go.Bar(
     x=x_labels,
     y=[1] * len(x_labels),
     marker_color=color_vals,
-    customdata=hover_texts, 
-    hovertemplate="%{customdata}<extra></extra>", 
-    width=1 
+    customdata=hover_texts,
+    hovertemplate="%{customdata}<extra></extra>",
+    width=1
 ))
 
 current_selected = st.session_state.forecast_slider
 try:
-    selected_idx = valid_times_display.index(current_selected)
+    selected_idx    = valid_times_display.index(current_selected)
     selected_x_label = x_labels[selected_idx]
 except ValueError:
     selected_x_label = x_labels[0]
 
-fig.add_trace(go.Scatter(
+fig_matrix.add_trace(go.Scatter(
     x=[selected_x_label],
     y=[-0.15],
     mode="markers",
@@ -673,58 +838,53 @@ fig.add_trace(go.Scatter(
     hoverinfo="skip"
 ))
 
-fig.update_layout(
-    height=65, 
+fig_matrix.update_layout(
+    height=65,
     margin=dict(l=0, r=0, t=0, b=25),
     plot_bgcolor="#1B1E23",
     paper_bgcolor="#1B1E23",
     xaxis=dict(
-        tickmode='array',
-        tickvals=tick_vals,
-        ticktext=tick_texts,
-        tickangle=0,
-        tickfont=dict(color="#A0A4AB", size=11, family="Source Sans Pro, sans-serif"),
-        showgrid=False,
-        zeroline=False,
-        fixedrange=True
+        tickmode='array', tickvals=tick_vals, ticktext=tick_texts,
+        tickangle=0, tickfont=dict(color="#A0A4AB", size=11, family="Source Sans Pro, sans-serif"),
+        showgrid=False, zeroline=False, fixedrange=True
     ),
     yaxis=dict(showticklabels=False, showgrid=False, zeroline=False, range=[-0.25, 1], fixedrange=True),
-    dragmode=False,
-    showlegend=False
+    dragmode=False, showlegend=False
 )
 
 try:
-    event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points", key="impact_matrix_chart", config={'displayModeBar': False})
+    event = st.plotly_chart(fig_matrix, use_container_width=True, on_select="rerun", selection_mode="points", key="impact_matrix_chart", config={'displayModeBar': False})
     if event and "selection" in event and "points" in event["selection"] and len(event["selection"]["points"]) > 0:
-        point_data = event["selection"]["points"][0]
+        point_data  = event["selection"]["points"][0]
         clicked_idx = point_data.get("point_index", point_data.get("pointIndex", None))
-        
         if clicked_idx is not None:
             target_time = valid_times_display[clicked_idx]
             if st.session_state.get("forecast_slider") != target_time:
                 st.session_state.forecast_slider = target_time
                 st.rerun()
-except Exception as e:
+except Exception:
     pass
 
 st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# FORECAST DASHBOARD EXECUTION (SINGLE HOUR)
-# ---------------------------------------------------------
 
-def update_time(offset):
+# =============================================================================
+# FORECAST DASHBOARD EXECUTION (SINGLE HOUR)
+# =============================================================================
+
+def update_time(offset: int) -> None:
     current_val = st.session_state.forecast_slider
     try:
         current_idx_in_valid = valid_times_display.index(current_val)
-        new_idx_in_valid = max(0, min(len(valid_times_display) - 1, current_idx_in_valid + offset))
+        new_idx_in_valid     = max(0, min(len(valid_times_display) - 1, current_idx_in_valid + offset))
         st.session_state.forecast_slider = valid_times_display[new_idx_in_valid]
     except ValueError:
         st.session_state.forecast_slider = valid_times_display[0]
 
+
 selected_time_str = st.sidebar.select_slider("Forecast Time:", options=valid_times_display, key="forecast_slider")
-idx = times_display.index(selected_time_str)
-relative_hr = valid_times_display.index(selected_time_str)
+forecast_idx      = times_display.index(selected_time_str)   # renamed from idx → forecast_idx
+relative_hr       = valid_times_display.index(selected_time_str)
 
 nav_col1, nav_col2, nav_col3 = st.sidebar.columns([1, 2, 1])
 nav_col1.button("◄", on_click=update_time, args=(-1,), use_container_width=True)
@@ -733,102 +893,107 @@ nav_col3.button("►", on_click=update_time, args=(1,), use_container_width=True
 
 st.sidebar.divider()
 
-# 1. CORE EXTRACTIONS
-t_temp_raw = h.get('temperature_2m', [0])[idx]
-t_temp = float(t_temp_raw) if t_temp_raw is not None else 0.0
 
-rh_raw = h.get('relative_humidity_2m', [0])[idx]
-rh = int(rh_raw) if rh_raw is not None else 0
+# --- 1. CORE EXTRACTIONS ---
+t_temp_raw = h.get('temperature_2m', [0])[forecast_idx]
+t_temp     = float(t_temp_raw) if t_temp_raw is not None else 0.0
 
-w_spd_raw = h.get('wind_speed_10m', [0])[idx]
-w_spd = (float(w_spd_raw) if w_spd_raw is not None else 0.0) * k_conv
+rh_raw = h.get('relative_humidity_2m', [0])[forecast_idx]
+rh     = int(rh_raw) if rh_raw is not None else 0
+
+w_spd_raw = h.get('wind_speed_10m', [0])[forecast_idx]
+w_spd     = (float(w_spd_raw) if w_spd_raw is not None else 0.0) * k_conv
 
 wx_list = h.get('weather_code', [0])
-wx = int(wx_list[idx]) if (wx_list and len(wx_list) > idx and wx_list[idx] is not None) else 0
+wx      = int(wx_list[forecast_idx]) if (wx_list and len(wx_list) > forecast_idx and wx_list[forecast_idx] is not None) else 0
 
-td = calc_td(t_temp, rh)
+td         = calc_td(t_temp, rh)
 sfc_spread = t_temp - td
 
 sn_depth_raw = h.get('snow_depth', [0])
-sn_depth = float(sn_depth_raw[idx]) if sn_depth_raw and len(sn_depth_raw) > idx and sn_depth_raw[idx] is not None else 0.0
+sn_depth     = float(sn_depth_raw[forecast_idx]) if sn_depth_raw and len(sn_depth_raw) > forecast_idx and sn_depth_raw[forecast_idx] is not None else 0.0
 
-sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
-sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
+sfc_dir_raw = h.get('wind_direction_10m', [0])[forecast_idx]
+sfc_dir     = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
 vis_raw_list = h.get('visibility')
-vis_raw_val = vis_raw_list[idx] if vis_raw_list and len(vis_raw_list) > idx else None
-vis_sm = calc_tactical_visibility(vis_raw_val, rh, w_spd, wx)
+vis_raw_val  = vis_raw_list[forecast_idx] if vis_raw_list and len(vis_raw_list) > forecast_idx else None
+vis_sm       = calc_tactical_visibility(vis_raw_val, rh, w_spd, wx)
 
-# 2. THERMAL PROFILE 
+
+# --- 2. THERMAL PROFILE ---
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
 for p in ALL_P_LEVELS:
     gh_list = h.get(f'geopotential_height_{p}hPa')
-    t_list = h.get(f'temperature_{p}hPa')
+    t_list  = h.get(f'temperature_{p}hPa')
     rh_list = h.get(f'relative_humidity_{p}hPa')
-    if gh_list and t_list and rh_list and len(gh_list) > idx:
-        if gh_list[idx] is not None and t_list[idx] is not None and rh_list[idx] is not None:
-            p_gh = float(gh_list[idx]) * 3.28084
-            p_t = float(t_list[idx])
-            p_rh = int(rh_list[idx])
+    if gh_list and t_list and rh_list and len(gh_list) > forecast_idx:
+        if gh_list[forecast_idx] is not None and t_list[forecast_idx] is not None and rh_list[forecast_idx] is not None:
+            p_gh = float(gh_list[forecast_idx]) * 3.28084
+            p_t  = float(t_list[forecast_idx])
+            p_rh = int(rh_list[forecast_idx])
             p_td = calc_td(p_t, p_rh)
             if p_gh > thermal_profile[-1]['h']:
                 thermal_profile.append({'h': p_gh, 't': p_t, 'td': p_td, 'spread': p_t - p_td, 'rh': p_rh})
 
-# 3. ADVANCED METRICS 
+
+# --- 3. ADVANCED METRICS ---
 sfc_press_raw = h.get('surface_pressure')
-if sfc_press_raw and len(sfc_press_raw) > idx and sfc_press_raw[idx] is not None:
-    sfc_press = float(sfc_press_raw[idx])
+if sfc_press_raw and len(sfc_press_raw) > forecast_idx and sfc_press_raw[forecast_idx] is not None:
+    sfc_press = float(sfc_press_raw[forecast_idx])
 else:
     sfc_press = 1013.25
+
 density_alt = calculate_density_altitude(sfc_elevation, t_temp, sfc_press)
 
 pop_raw = h.get('precipitation_probability', [0])
-pop = int(pop_raw[idx]) if pop_raw and len(pop_raw) > idx and pop_raw[idx] is not None else 0
+pop     = int(pop_raw[forecast_idx]) if pop_raw and len(pop_raw) > forecast_idx and pop_raw[forecast_idx] is not None else 0
 
 precip_raw = h.get('precipitation', [0])
-precip = float(precip_raw[idx]) if precip_raw and len(precip_raw) > idx and precip_raw[idx] is not None else 0.0
+precip     = float(precip_raw[forecast_idx]) if precip_raw and len(precip_raw) > forecast_idx and precip_raw[forecast_idx] is not None else 0.0
 
 cape_raw = h.get('cape', [0])
-cape = int(cape_raw[idx]) if cape_raw and len(cape_raw) > idx and cape_raw[idx] is not None else 0
+cape     = int(cape_raw[forecast_idx]) if cape_raw and len(cape_raw) > forecast_idx and cape_raw[forecast_idx] is not None else 0
 
 pbl_raw = h.get('boundary_layer_height')
-if pbl_raw and len(pbl_raw) > idx and pbl_raw[idx] is not None:
-    pbl_m = float(pbl_raw[idx])
+if pbl_raw and len(pbl_raw) > forecast_idx and pbl_raw[forecast_idx] is not None:
+    pbl_m  = float(pbl_raw[forecast_idx])
     pbl_ft = int(pbl_m * 3.28084)
     pbl_disp = f"{pbl_ft:,} ft AGL"
 else:
     pbl_calc_agl = 2000
     if len(thermal_profile) > 1:
         for k in range(1, len(thermal_profile)):
-            if thermal_profile[k]['t'] >= thermal_profile[k-1]['t']: 
-                pbl_calc_agl = max(0, thermal_profile[k-1]['h'] - sfc_elevation)
+            if thermal_profile[k]['t'] >= thermal_profile[k - 1]['t']:
+                pbl_calc_agl = max(0, thermal_profile[k - 1]['h'] - sfc_elevation)
                 break
     pbl_disp = f"{int(pbl_calc_agl):,} ft AGL (Est)"
 
 frz_raw_list = h.get('freezing_level_height')
-if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
-    frz_raw = float(frz_raw_list[idx])
+if frz_raw_list and len(frz_raw_list) > forecast_idx and frz_raw_list[forecast_idx] is not None:
+    frz_raw  = float(frz_raw_list[forecast_idx])
     frz_disp = "SFC" if t_temp <= 0 else f"{int(round(frz_raw * 3.28, -2)):,} ft"
 else:
-    if t_temp <= 0: frz_disp = "SFC"
+    if t_temp <= 0:
+        frz_disp = "SFC"
     else:
         frz_disp = "> 10,000 ft"
-        for i in range(1, len(thermal_profile)):
-            lower, upper = thermal_profile[i-1], thermal_profile[i]
+        for k in range(1, len(thermal_profile)):
+            lower, upper = thermal_profile[k - 1], thermal_profile[k]
             if upper['t'] <= 0:
-                t_diff = lower['t'] - upper['t']
-                frz_h = lower['h'] + (lower['t'] / t_diff) * (upper['h'] - lower['h']) if t_diff > 0 else lower['h']
+                t_diff   = lower['t'] - upper['t']
+                frz_h    = lower['h'] + (lower['t'] / t_diff) * (upper['h'] - lower['h']) if t_diff > 0 else lower['h']
                 frz_disp = f"{int(round(frz_h, -2)):,} ft"
                 break
 
-t_950_list = h.get('temperature_925hPa')
-t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_950_list[idx] is not None) else t_temp
+t_950_list    = h.get('temperature_925hPa')
+t_950         = float(t_950_list[forecast_idx]) if (t_950_list and len(t_950_list) > forecast_idx and t_950_list[forecast_idx] is not None) else t_temp
 lapse_rate_temp_drop = t_temp - t_950
 is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
 
-# THERMAL PHASE GATE (PRECIPITATION VETO)
-cb_v = None
-ct_v = None
+
+# --- THERMAL PHASE GATE (PRECIPITATION VETO) ---
+cb_v = ct_v = None
 for layer in thermal_profile:
     if layer['spread'] <= 4.0:
         if cb_v is None: cb_v = layer['h']
@@ -836,12 +1001,11 @@ for layer in thermal_profile:
 c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
 
 if 50 <= wx <= 59 and (c_depth >= 2500 or precip >= 0.5 or is_convective):
-    frz_raw_sh = float(frz_raw_list[idx]) if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None else 0.0
-    frz_agl_sh = max(0, (frz_raw_sh * 3.28084) - sfc_elevation)
+    frz_raw_sh  = float(frz_raw_list[forecast_idx]) if frz_raw_list and len(frz_raw_list) > forecast_idx and frz_raw_list[forecast_idx] is not None else 0.0
+    frz_agl_sh  = max(0, (frz_raw_sh * 3.28084) - sfc_elevation)
+    warm_nose   = any(layer['t'] > 0 for layer in thermal_profile[1:])
+    is_heavy    = wx in [54, 55, 57]
 
-    warm_nose = any(layer['t'] > 0 for layer in thermal_profile[1:])
-    is_heavy = wx in [54, 55, 57]
-    
     if t_temp <= 0:
         wx = (67 if is_heavy else 66) if warm_nose else (73 if is_heavy else 71)
     elif 0 < t_temp <= 2.5 and frz_agl_sh < 1500:
@@ -849,61 +1013,62 @@ if 50 <= wx <= 59 and (c_depth >= 2500 or precip >= 0.5 or is_convective):
     else:
         wx = 63 if is_heavy else 61
 
-c_base_agl = 99999
-c_amt = "CLR"
+
+# --- CLOUD BASE CASCADE ---
+c_base_agl  = 99999
+c_amt       = "CLR"
 c_base_disp = "CLR"
 
 search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
+
 for layer in search_profile:
     h_agl = max(0, layer['h'] - sfc_elevation)
-    if layer['spread'] <= 3.0: 
+    if layer['spread'] <= 3.0:
         if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
-        
         c_base_agl = int(round(h_agl, -2))
-        c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
-        
+        c_amt      = "OVC" if layer['spread'] <= 1.0 else "BKN"
         if c_base_agl == 0:
             if vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
-            else: c_amt = "VV"
+            else:                                      c_amt      = "VV"
         break
-        
+
 if c_amt == "CLR":
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 5.0:
             if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
             c_base_agl = int(round(h_agl, -2))
-            c_amt = "SCT"
+            c_amt      = "SCT"
             if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
             break
-            
+
 if c_amt == "CLR":
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 7.0:
             if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
             c_base_agl = int(round(h_agl, -2))
-            c_amt = "FEW"
+            c_amt      = "FEW"
             if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
             break
 
-# UI CONVECTIVE LABEL OVERRIDE
 if is_convective and c_amt == "CLR":
     ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
     if ccl_base < 10000:
         c_base_agl = ccl_base
-        c_amt = "BKN" if wx >= 80 else "SCT"
+        c_amt      = "BKN" if wx >= 80 else "SCT"
 
 c_base_disp = f"{c_base_agl:,} ft {c_amt}" if c_amt != "CLR" else "CLR"
 
-raw_gst_list = h.get('wind_gusts_10m')
-raw_gst = (float(raw_gst_list[idx]) * k_conv) if (raw_gst_list and len(raw_gst_list) > idx and raw_gst_list[idx] is not None) else w_spd
-gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
-# RECALIBRATED DRIFTING VS BLOWING SNOW STRING OVERRIDE
-is_snowing = wx in [71, 73, 75, 77, 85, 86, 68, 69]
+# --- GUST & BLSN/DRSN ---
+raw_gst_list = h.get('wind_gusts_10m')
+raw_gst      = (float(raw_gst_list[forecast_idx]) * k_conv) if (raw_gst_list and len(raw_gst_list) > forecast_idx and raw_gst_list[forecast_idx] is not None) else w_spd
+gst          = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
+
+is_snowing   = wx in [71, 73, 75, 77, 85, 86, 68, 69]
 is_cold_snow = t_temp <= -5.0
-has_snowpack = sn_depth >= 0.05
+has_snowpack = sn_depth >= SNOWPACK_BLSN_THRESHOLD_M
 
 blsn_trigger = False
 drsn_trigger = False
@@ -927,118 +1092,114 @@ if wx in [45, 48]:
         weather_str = "FREEZING FOG (FZFG)" if t_temp <= 0 else "FOG (FG)"
 elif wx < 40 and vis_sm < 7.0:
     if rh >= 85:
-        if vis_sm <= 0.62: 
-            weather_str = "FREEZING FOG (FZFG)" if t_temp <= 0 else "FOG (FG)"
-        else: 
-            weather_str = "MIST (BR)"
+        if vis_sm <= 0.62: weather_str = "FREEZING FOG (FZFG)" if t_temp <= 0 else "FOG (FG)"
+        else:              weather_str = "MIST (BR)"
     elif rh >= 75:
         weather_str = "HAZE (HZ)"
 
 if blsn_trigger:
-    if is_snowing:
-        weather_str = f"{weather_str} & BLSN"
-    else:
-        weather_str = "BLOWING SNOW (BLSN)"
+    weather_str = f"{weather_str} & BLSN" if is_snowing else "BLOWING SNOW (BLSN)"
 elif drsn_trigger:
     weather_str = "DRIFTING SNOW (DRSN)"
 
-if vis_sm > 7: vis_disp = "> 7 SM"
-else: vis_disp = f"{vis_sm:.1f} SM"
+vis_disp = "> 7 SM" if vis_sm > 7 else f"{vis_sm:.1f} SM"
 
-# 4. EXACT AGL INJECTION FOR TACTICAL STACK
-w_80_raw = h.get('wind_speed_80m', [None])[idx]
-w_120_raw = h.get('wind_speed_120m', [None])[idx]
-d_80_raw = h.get('wind_direction_80m', [None])[idx]
-d_120_raw = h.get('wind_direction_120m', [None])[idx]
+
+# --- 4. EXACT AGL INJECTION FOR TACTICAL STACK ---
+w_80_raw  = h.get('wind_speed_80m',   [None])[forecast_idx]
+w_120_raw = h.get('wind_speed_120m',  [None])[forecast_idx]
+d_80_raw  = h.get('wind_direction_80m',  [None])[forecast_idx]
+d_120_raw = h.get('wind_direction_120m', [None])[forecast_idx]
 
 has_agl_data = w_80_raw is not None and w_120_raw is not None
 
 if has_agl_data:
-    w_80 = float(w_80_raw) * k_conv
+    w_80  = float(w_80_raw)  * k_conv
     w_120 = float(w_120_raw) * k_conv
-    d_80 = float(d_80_raw) if d_80_raw is not None else sfc_dir
+    d_80  = float(d_80_raw)  if d_80_raw  is not None else sfc_dir
     d_120 = float(d_120_raw) if d_120_raw is not None else d_80
-    
-    u_v, u_h, u_dir = w_120, 120.0, d_120 
+    # These scalars anchor the extended trajectory baseline
+    u_v, u_h, u_dir = w_120, 120.0, d_120
 else:
+    # Fallback: derive upper reference from pressure-level data
     u_v_list = h.get('wind_speed_1000hPa')
-    if u_v_list and len(u_v_list) > idx and u_v_list[idx] is not None:
-        u_v = float(u_v_list[idx]) * k_conv
-        u_dir = int(h.get('wind_direction_1000hPa', [0])[idx])
+    if u_v_list and len(u_v_list) > forecast_idx and u_v_list[forecast_idx] is not None:
+        u_v   = float(u_v_list[forecast_idx]) * k_conv
+        u_dir = int(h.get('wind_direction_1000hPa', [0])[forecast_idx])
         u_h_list = h.get('geopotential_height_1000hPa')
-        u_h = float(u_h_list[idx]) if (u_h_list and len(u_h_list) > idx and u_h_list[idx] is not None) else 110.0
+        u_h   = float(u_h_list[forecast_idx]) if (u_h_list and len(u_h_list) > forecast_idx and u_h_list[forecast_idx] is not None) else 110.0
     else:
         u_v_list = h.get('wind_speed_925hPa')
-        if u_v_list and len(u_v_list) > idx and u_v_list[idx] is not None:
-            u_v = float(u_v_list[idx]) * k_conv
-            u_dir = int(h.get('wind_direction_925hPa', [0])[idx])
+        if u_v_list and len(u_v_list) > forecast_idx and u_v_list[forecast_idx] is not None:
+            u_v   = float(u_v_list[forecast_idx]) * k_conv
+            u_dir = int(h.get('wind_direction_925hPa', [0])[forecast_idx])
             u_h_list = h.get('geopotential_height_925hPa')
-            u_h = float(u_h_list[idx]) if (u_h_list and len(u_h_list) > idx and u_h_list[idx] is not None) else 760.0
+            u_h   = float(u_h_list[forecast_idx]) if (u_h_list and len(u_h_list) > forecast_idx and u_h_list[forecast_idx] is not None) else 760.0
         else:
             u_v, u_dir, u_h = w_spd, sfc_dir, 10.0
-    
-icing_cond = calculate_icing_profile(h, idx, wx)
-dt_utc_exact_iso = h["time"][idx]
-astro = fetch_astronomy_cached(lat, lon, dt_utc_exact_iso, tz_str, tz_abbr)
-space_data = fetch_space_weather_cached(dt_utc_exact_iso)
 
-sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL"
+icing_cond       = calculate_icing_profile(h, forecast_idx, wx)
+dt_utc_exact_iso = h["time"][forecast_idx]
+astro            = fetch_astronomy_cached(lat, lon, dt_utc_exact_iso, tz_str, tz_abbr)
+space_data       = fetch_space_weather_cached(dt_utc_exact_iso)
+
+sun_pos_display  = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL"
 moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL"
 
-if int(w_spd) == 0: sfc_dir_disp, sfc_spd_disp = "CALM", "0"
-elif int(w_spd) <= 3: sfc_dir_disp, sfc_spd_disp = "VRB", "3"
-else: sfc_dir_disp, sfc_spd_disp = f"{sfc_dir:03d}°", str(int(w_spd))
+if int(w_spd) == 0:   sfc_dir_disp, sfc_spd_disp = "CALM", "0"
+elif int(w_spd) <= 3: sfc_dir_disp, sfc_spd_disp = "VRB",  "3"
+else:                  sfc_dir_disp, sfc_spd_disp = f"{sfc_dir:03d}°", str(int(w_spd))
 
-# --- UI RENDERING STARTS HERE ---
+
+# =============================================================================
+# UI RENDERING
+# =============================================================================
 
 st.subheader("Forecasted Surface Data")
 c = st.columns(8)
-c[0].metric("Temp", f"{t_temp}°C")
-c[1].metric("RH", f"{rh}%")
-c[2].metric("Wind Dir", sfc_dir_disp)
-c[3].metric(f"Wind Spd", f"{sfc_spd_disp} {raw_wind_unit}")
-c[4].metric("Weather", weather_str)
-c[5].metric("Visibility", vis_disp)
+c[0].metric("Temp",        f"{t_temp}°C")
+c[1].metric("RH",          f"{rh}%")
+c[2].metric("Wind Dir",    sfc_dir_disp)
+c[3].metric("Wind Spd",    f"{sfc_spd_disp} {raw_wind_unit}")
+c[4].metric("Weather",     weather_str)
+c[5].metric("Visibility",  vis_disp)
 c[6].metric("Freezing LVL", frz_disp)
-c[7].metric("Cloud Base", c_base_disp)
+c[7].metric("Cloud Base",  c_base_disp)
 
 st.divider()
 
-st.subheader(f"Tactical Hazard Stack (0-400ft AGL)")
+st.subheader("Tactical Hazard Stack (0-400ft AGL)")
 stack_tactical = []
-
-gust_delta = max(0, gst - w_spd)
+gust_delta     = max(0, gst - w_spd)
 
 for alt in [400, 300, 200, 100]:
     alt_m = alt * 0.3048
-    
+
     if has_agl_data:
         if alt_m <= 80:
-            frac = (alt_m - 10) / (80 - 10) if alt_m > 10 else 0
-            s_c = w_spd + frac * (w_80 - w_spd)
+            frac  = (alt_m - 10) / (80 - 10) if alt_m > 10 else 0
+            s_c   = w_spd + frac * (w_80 - w_spd)
             d_c_raw = sfc_dir + frac * ((d_80 - sfc_dir + 180) % 360 - 180)
         elif alt_m <= 120:
-            frac = (alt_m - 80) / (120 - 80)
-            s_c = w_80 + frac * (w_120 - w_80)
+            frac  = (alt_m - 80) / (120 - 80)
+            s_c   = w_80 + frac * (w_120 - w_80)
             d_c_raw = d_80 + frac * ((d_120 - d_80 + 180) % 360 - 180)
         else:
-            s_c = w_120
+            s_c   = w_120
             d_c_raw = d_120
     else:
-        s_c = w_spd + (u_v - w_spd) * (math.log(max(1, alt_m)/10) / math.log(max(1.1, u_h/10)))
+        s_c     = w_spd + (u_v - w_spd) * (math.log(max(1, alt_m) / 10) / math.log(max(1.1, u_h / 10)))
         d_c_raw = sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt_m, u_h) / max(0.1, u_h))
-        
-    g_c = s_c + gust_delta
-    d_c = format_dir(d_c_raw % 360, s_c)
-    
+
+    g_c     = s_c + gust_delta
+    d_c     = format_dir(d_c_raw % 360, s_c)
     alt_msl = sfc_elevation + alt
     alt_t, alt_rh = get_interp_thermals(alt_msl, thermal_profile)
-    
-    turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
-    
-    if int(s_c) == 0: mat_dir, mat_spd = "CALM", "0"
-    elif int(s_c) <= 3: mat_dir, mat_spd = "VRB", "3"
-    else: mat_dir, mat_spd = f"{d_c:03d}°", str(int(s_c))
+    turb, ice     = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
+
+    if int(s_c) == 0:   mat_dir, mat_spd = "CALM", "0"
+    elif int(s_c) <= 3: mat_dir, mat_spd = "VRB",  "3"
+    else:                mat_dir, mat_spd = f"{d_c:03d}°", str(int(s_c))
 
     stack_tactical.append({"Alt (AGL)": f"{alt}ft", "Dir": mat_dir, f"Spd ({raw_wind_unit})": mat_spd, f"Gust ({raw_wind_unit})": str(int(g_c)), "Turbulence": turb, "Icing": ice})
 
@@ -1050,39 +1211,42 @@ p_levels_traj = [1000, 925, 850, 700]
 
 p_profile = []
 for p in p_levels_traj:
-    ws_list, wd_list, gh_list = h.get(f'wind_speed_{p}hPa'), h.get(f'wind_direction_{p}hPa'), h.get(f'geopotential_height_{p}hPa')
-    if ws_list and wd_list and gh_list and len(ws_list) > idx:
-        ws, wd, gh = ws_list[idx], wd_list[idx], gh_list[idx]
+    ws_list = h.get(f'wind_speed_{p}hPa')
+    wd_list = h.get(f'wind_direction_{p}hPa')
+    gh_list = h.get(f'geopotential_height_{p}hPa')
+    if ws_list and wd_list and gh_list and len(ws_list) > forecast_idx:
+        ws, wd, gh = ws_list[forecast_idx], wd_list[forecast_idx], gh_list[forecast_idx]
         if ws is not None and wd is not None and gh is not None:
             p_profile.append({'h': float(gh) * 3.28, 's': float(ws) * k_conv, 'd': int(wd)})
 
-p_profile = sorted(p_profile, key=lambda x: x['h'])
-stack_ext = []
+p_profile  = sorted(p_profile, key=lambda x: x['h'])
+stack_ext  = []
 
 if not p_profile:
     for alt in [5000, 4000, 3000, 2000, 1000]:
         stack_ext.append({"Alt (AGL)": f"{alt}ft", "Dir": "N/A", f"Spd ({raw_wind_unit})": "N/A", f"Gust ({raw_wind_unit})": "N/A", "Turbulence": "N/A", "Icing": "N/A"})
 else:
     for alt in [5000, 4000, 3000, 2000, 1000]:
-        pts = [{'h': u_h*3.28, 's': u_v, 'd': u_dir}] + p_profile
+        pts = [{'h': u_h * 3.28, 's': u_v, 'd': u_dir}] + p_profile
         blw, abv = pts[0], pts[-1]
-        for i in range(len(pts)-1):
-            if pts[i]['h'] <= alt <= pts[i+1]['h']:
-                blw, abv = pts[i], pts[i+1]; break
-        
-        frac = (alt - blw['h']) / (abv['h'] - blw['h']) if abv['h'] != blw['h'] else 0
-        s_e = blw['s'] + frac * (abv['s'] - blw['s'])
+        for p_i in range(len(pts) - 1):        # FIX: renamed loop var from i → p_i
+            if pts[p_i]['h'] <= alt <= pts[p_i + 1]['h']:
+                blw, abv = pts[p_i], pts[p_i + 1]
+                break
+
+        frac    = (alt - blw['h']) / (abv['h'] - blw['h']) if abv['h'] != blw['h'] else 0
+        s_e     = blw['s'] + frac * (abv['s'] - blw['s'])
         d_e_raw = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
-        d_e = format_dir(d_e_raw, s_e)
-        g_e = s_e + gust_delta
-        
+        d_e     = format_dir(d_e_raw, s_e)
+        g_e     = s_e + gust_delta
+
         alt_msl = sfc_elevation + alt
         alt_t, alt_rh = get_interp_thermals(alt_msl, thermal_profile)
-        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
-        
-        if int(s_e) == 0: mat_dir_ext, mat_spd_ext = "CALM", "0"
-        elif int(s_e) <= 3: mat_dir_ext, mat_spd_ext = "VRB", "3"
-        else: mat_dir_ext, mat_spd_ext = f"{d_e:03d}°", str(int(s_e))
+        turb, ice     = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
+
+        if int(s_e) == 0:   mat_dir_ext, mat_spd_ext = "CALM", "0"
+        elif int(s_e) <= 3: mat_dir_ext, mat_spd_ext = "VRB",  "3"
+        else:                mat_dir_ext, mat_spd_ext = f"{d_e:03d}°", str(int(s_e))
 
         stack_ext.append({"Alt (AGL)": f"{alt}ft", "Dir": mat_dir_ext, f"Spd ({raw_wind_unit})": mat_spd_ext, f"Gust ({raw_wind_unit})": str(int(g_e)), "Turbulence": turb, "Icing": ice})
 
@@ -1094,37 +1258,36 @@ st.divider()
 st.subheader(f"Light Profile ({astro['tz']})")
 ac1, ac2, ac3, ac4, ac5 = st.columns(5)
 ac1.metric("Dawn (Civil)", astro['dawn'])
-ac2.metric("Sunrise", astro['sunrise'])
-ac3.metric("Sunset", astro['sunset'])
+ac2.metric("Sunrise",      astro['sunrise'])
+ac3.metric("Sunset",       astro['sunset'])
 ac4.metric("Dusk (Civil)", astro['dusk'])
-ac5.metric("Sun Pos", sun_pos_display)
+ac5.metric("Sun Pos",      sun_pos_display)
 
 mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-mc1.metric("Moonrise", astro['moonrise'])
-mc2.metric("Moonset", astro['moonset'])
+mc1.metric("Moonrise",     astro['moonrise'])
+mc2.metric("Moonset",      astro['moonset'])
 mc3.metric("Illumination", f"{astro['moon_ill']}%")
-mc4.metric("Moon Pos", moon_pos_display)
+mc4.metric("Moon Pos",     moon_pos_display)
 mc5.empty()
 
 st.divider()
 st.subheader("Space Weather (GNSS & C2 Link)")
 
 risk_color = "#ff4b4b" if space_data['risk'] in ["HIGH (G1)", "SEVERE (G2+)"] else "#D1D5DB"
-space_wx_html = f"""
+st.markdown(f"""
 <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
     <div class="obs-text">
-        <strong style="color: #8E949E;">PLANETARY KP INDEX:</strong> 
-        <span style="color: #E58E26; font-size: 1.1rem; font-weight: bold;">{space_data['kp']}</span> 
-        &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; 
-        <strong style="color: #8E949E;">GNSS RISK:</strong> 
+        <strong style="color: #8E949E;">PLANETARY KP INDEX:</strong>
+        <span style="color: #E58E26; font-size: 1.1rem; font-weight: bold;">{space_data['kp']}</span>
+        &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;
+        <strong style="color: #8E949E;">GNSS RISK:</strong>
         <span style="color: {risk_color}; font-weight: bold; font-size: 1.1rem;">{space_data['risk']}</span>
         <br><br>
         <strong style="color: #8E949E;">OPERATIONAL IMPACT:</strong><br>
         {space_data['impact']}
     </div>
 </div>
-"""
-st.markdown(space_wx_html, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 st.divider()
 
@@ -1132,32 +1295,33 @@ if icao == "NONE":
     st.subheader("Station Actuals")
     st.markdown('<div class="obs-text">No METAR/TAF information within a 50km radius.</div>', unsafe_allow_html=True)
     clean_metar = "NIL"
-    clean_taf = "NIL"
+    clean_taf   = "NIL"
 else:
     clean_metar = re.sub('<[^<]+>', '', metar_raw)
-    
+
     raw_taf_no_html = re.sub('<[^<]+>', '', taf_raw)
     raw_taf_no_html = raw_taf_no_html.replace(" RMK ", "\nRMK ")
     taf_lines = [line.strip() for line in raw_taf_no_html.split('\n') if line.strip()]
-    
-    ui_taf_lines = []
+
+    ui_taf_lines  = []
     csv_taf_lines = []
-    
-    for i, line in enumerate(taf_lines):
-        if i == 0 or i == len(taf_lines) - 1 or line.startswith("FM") or line.startswith("RMK"):
+
+    # FIX: renamed loop variable from i → taf_line_i to prevent shadowing forecast_idx
+    for taf_line_i, line in enumerate(taf_lines):
+        if taf_line_i == 0 or taf_line_i == len(taf_lines) - 1 or line.startswith("FM") or line.startswith("RMK"):
             ui_taf_lines.append(line)
             csv_taf_lines.append(line)
         else:
             ui_taf_lines.append("&nbsp;&nbsp;&nbsp;&nbsp;" + line)
             csv_taf_lines.append("    " + line)
-            
+
     ui_rebuilt_taf = '\n'.join(ui_taf_lines)
-    clean_taf = '\n'.join(csv_taf_lines)
-    
+    clean_taf      = '\n'.join(csv_taf_lines)
+
     metar_disp = apply_tactical_highlights(clean_metar)
-    taf_disp = apply_tactical_highlights(ui_rebuilt_taf)
-    taf_disp = taf_disp.replace('\n', '<br>')
-    
+    taf_disp   = apply_tactical_highlights(ui_rebuilt_taf)
+    taf_disp   = taf_disp.replace('\n', '<br>')
+
     st.subheader(f"Station Actuals: {icao} | {stn_dist:.1f} km {stn_dir} of AO")
     st.markdown(f'''
     <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
@@ -1176,14 +1340,22 @@ else:
 
 st.divider()
 
-# --- ENTERPRISE PDF EXPORT ENGINE ---
-def generate_pdf_report():
+
+# =============================================================================
+# ENTERPRISE PDF EXPORT ENGINE
+# FIX: Previously, generate_pdf_report() was called directly inside
+# st.download_button(data=...), causing a full PDF build on EVERY Streamlit
+# rerender. The PDF is now cached in session_state and only regenerated when
+# the forecast index, coordinates, model, or ICAO actually change.
+# =============================================================================
+
+def generate_pdf_report() -> bytes:
     stn_display_str = f"{icao} | {stn_dist:.1f} km {stn_dir} of AO" if icao != "NONE" else "No valid ICAO within 50km."
-    
+
     pdf = FPDF()
     pdf.add_page()
-    
-    def safe_txt(txt):
+
+    def safe_txt(txt: str) -> str:
         return str(txt).replace('°', ' deg').encode('latin-1', 'replace').decode('latin-1')
 
     pdf.set_font("helvetica", "B", 14)
@@ -1216,13 +1388,22 @@ def generate_pdf_report():
     pdf.set_font("helvetica", "B", 12)
     pdf.cell(0, 8, "FORECASTED SURFACE CONDITIONS", border=0, new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", "", 10)
-    pdf.multi_cell(0, 6, safe_txt(f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\nWind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\nWeather: {weather_str} | Visibility: {vis_disp}\nCloud Base: {c_base_disp} | Freezing Level: {frz_disp}"))
+    pdf.multi_cell(0, 6, safe_txt(
+        f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\n"
+        f"Wind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\n"
+        f"Weather: {weather_str} | Visibility: {vis_disp}\n"
+        f"Cloud Base: {c_base_disp} | Freezing Level: {frz_disp}"
+    ))
     pdf.ln(5)
 
     pdf.set_font("helvetica", "B", 12)
     pdf.cell(0, 8, "ASTRONOMICAL & SPACE WEATHER", border=0, new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", "", 10)
-    pdf.multi_cell(0, 6, safe_txt(f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\nMoon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\nSpace Weather: Kp Index {space_data['kp']} | GNSS Risk: {space_data['risk']}"))
+    pdf.multi_cell(0, 6, safe_txt(
+        f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
+        f"Moon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n"
+        f"Space Weather: Kp Index {space_data['kp']} | GNSS Risk: {space_data['risk']}"
+    ))
     pdf.ln(5)
 
     if icao != "NONE":
@@ -1239,78 +1420,84 @@ def generate_pdf_report():
         pdf.multi_cell(0, 5, safe_txt(clean_taf))
         pdf.ln(5)
 
-    def draw_table(title, df):
+    def draw_table(title: str, df: pd.DataFrame) -> None:
         pdf.set_font("helvetica", "B", 12)
         pdf.cell(0, 8, title, border=0, new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("helvetica", "B", 9)
-        
-        col_names = ["Alt (AGL)"] + list(df.columns)
-        col_widths = [25, 20, 25, 25, 30, 25] 
-        
-        for i, col in enumerate(col_names):
-            pdf.cell(col_widths[i], 8, safe_txt(str(col)), border=1, align='C')
+        col_names  = ["Alt (AGL)"] + list(df.columns)
+        col_widths = [25, 20, 25, 25, 30, 25]
+        for col_i, col in enumerate(col_names):
+            pdf.cell(col_widths[col_i], 8, safe_txt(str(col)), border=1, align='C')
         pdf.ln(8)
-        
         pdf.set_font("helvetica", "", 9)
-        for idx_val, row in df.iterrows():
-            pdf.cell(col_widths[0], 8, safe_txt(str(idx_val)), border=1, align='C')
-            for i, val in enumerate(row):
-                pdf.cell(col_widths[i+1], 8, safe_txt(str(val)), border=1, align='C')
+        for row_label, row in df.iterrows():
+            pdf.cell(col_widths[0], 8, safe_txt(str(row_label)), border=1, align='C')
+            for val_i, val in enumerate(row):
+                pdf.cell(col_widths[val_i + 1], 8, safe_txt(str(val)), border=1, align='C')
             pdf.ln(8)
         pdf.ln(5)
 
-    draw_table("TACTICAL HAZARD STACK (0-400ft AGL)", df_tactical)
-    draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)", df_ext)
-    
-    # ADVANCED THERMODYNAMICS
+    draw_table("TACTICAL HAZARD STACK (0-400ft AGL)",      df_tactical)
+    draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)",  df_ext)
+
     pdf.set_font("helvetica", "B", 12)
     pdf.cell(0, 8, "THERMODYNAMIC & AERODYNAMIC PROFILE", border=0, new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", "", 10)
-    pdf.multi_cell(0, 6, safe_txt(f"Precipitation Risk: {pop}% ({precip} mm)\nDensity Altitude (DA): {density_alt:,} ft | PBL Height: {pbl_disp}\nConvective Available Potential Energy (CAPE): {cape} J/kg"))
+    pdf.multi_cell(0, 6, safe_txt(
+        f"Precipitation Risk: {pop}% ({precip} mm)\n"
+        f"Density Altitude (DA): {density_alt:,} ft | PBL Height: {pbl_disp}\n"
+        f"Convective Available Potential Energy (CAPE): {cape} J/kg"
+    ))
     pdf.ln(5)
-    
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp_name = tmp.name
-    
+
     try:
         pdf.output(tmp_name)
         with open(tmp_name, "rb") as f:
-            pdf_bytes = f.read()
+            return f.read()
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
-            
-    return pdf_bytes
 
-def log_download_callback():
-    try:
-        log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "DOWNLOAD_PDF")
-    except Exception:
-        pass 
+
+# Cache the PDF in session_state — only rebuild when the briefing state changes
+_pdf_cache_key = f"{lat}_{lon}_{forecast_idx}_{model_choice}_{icao}"
+if st.session_state.get("_pdf_cache_key") != _pdf_cache_key:
+    st.session_state["_pdf_bytes"]     = generate_pdf_report()
+    st.session_state["_pdf_cache_key"] = _pdf_cache_key
+
+
+def log_download_callback() -> None:
+    try: log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "DOWNLOAD_PDF")
+    except Exception: pass
+
 
 st.download_button(
-    label="Download Flight Briefing (PDF)",
-    data=generate_pdf_report(),
-    file_name=f"VCAG_Briefing_{lat}_{lon}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-    mime="application/pdf",
-    on_click=log_download_callback
+    label     = "Download Flight Briefing (PDF)",
+    data      = st.session_state["_pdf_bytes"],
+    file_name = f"VCAG_Briefing_{lat}_{lon}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+    mime      = "application/pdf",
+    on_click  = log_download_callback,
 )
 
 st.divider()
-st.subheader("Vertical Atmospheric Profile (Convective Ops)")
-fig = plot_convective_profile(h, idx, t_temp, td, w_spd, sfc_dir, sfc_elevation)
 
-if fig: st.pyplot(fig)
-else: st.warning("Insufficient atmospheric layers available to render vertical profile.")
+st.subheader("Vertical Atmospheric Profile (Convective Ops)")
+fig_skewt = plot_convective_profile(h, forecast_idx, t_temp, td, w_spd, sfc_dir, sfc_elevation)
+
+if fig_skewt: st.pyplot(fig_skewt)
+else:         st.warning("Insufficient atmospheric layers available to render vertical profile.")
 
 st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
 
 # SENSOR DEGRADATION METRICS
 c2 = st.columns(4)
-c2[0].metric("Precipitation Risk", f"{pop}% ({precip} mm)")
+c2[0].metric("Precipitation Risk",  f"{pop}% ({precip} mm)")
 c2[1].metric("Density Altitude (DA)", f"{density_alt:,} ft")
 c2[2].metric("PBL (Boundary Layer)", pbl_disp)
-c2[3].metric("CAPE (Instability)", f"{cape} J/kg")
+c2[3].metric("CAPE (Instability)",   f"{cape} J/kg")
 
 st.divider()
 st.markdown("""
@@ -1320,6 +1507,7 @@ This system translates raw meteorological model data for uncrewed systems. It do
 <em>Usage of this system, including geographic querying and PDF generation, is actively logged to a secure database for audit and security purposes.</em>
 </div>
 """, unsafe_allow_html=True)
+
 
 # AUTO-SAVE STATE PERSISTENCE ENGINE
 try:
