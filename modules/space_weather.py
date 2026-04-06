@@ -6,14 +6,15 @@ def get_kp_index(target_dt_utc):
     """
     Fetches Planetary K-index from the NOAA SWPC JSON API.
     Determines GNSS and C2 link risk based on geomagnetic storm scaling.
+    Dynamically handles both legacy array and new object JSON structures.
     """
     url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
     
-    # Graceful degradation fallback if NOAA goes offline
+    # Graceful degradation fallback if NOAA connection fails or parsing faults
     fallback_data = {
-        'kp': "N/A", 
-        'risk': "UNAVAILABLE", 
-        'impact': "NOAA SWPC connection failed or format changed. Monitor local GNSS satellite counts and HDOP closely prior to launch."
+        'kp': "ERR", 
+        'risk': "PARSE_FAIL", 
+        'impact': "Connected to NOAA, but no valid Kp numbers found. Monitor local GNSS satellite counts and HDOP closely prior to launch."
     }
 
     try:
@@ -21,24 +22,42 @@ def get_kp_index(target_dt_utc):
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
             
-        # NOAA JSON format: [["time_tag", "kp", "observed", "noaa_scale"], ["2026-04-04 00:00:00", "3.33", ...]]
-        if not data or len(data) < 2:
+        if not data:
             return fallback_data
 
         best_kp = None
         min_diff = float('inf')
         
-        # Iterate through the forecast array to find the closest time match
-        for row in data[1:]:
-            time_str, kp_str = row[0], row[1]
-            
-            # NOAA time_tag format: "YYYY-MM-DD HH:MM:SS"
-            row_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        for row in data:
+            # Shield against the legacy header row
+            if isinstance(row, list) and row[0] == "time_tag":
+                continue 
+                
+            # NOAA POST-MARCH 2026 FORMAT (Dictionaries)
+            if isinstance(row, dict):
+                time_str = row.get("time_tag")
+                kp_val_raw = row.get("kp")
+            # NOAA PRE-MARCH 2026 FORMAT (Lists)
+            elif isinstance(row, list) and len(row) >= 2:
+                time_str = row[0]
+                kp_val_raw = row[1]
+            else:
+                continue
+
+            if not time_str or kp_val_raw is None:
+                continue
+
+            # Parse NOAA time_tag format: "YYYY-MM-DD HH:MM:SS"
+            try:
+                row_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+                
             diff = abs((row_dt - target_dt_utc).total_seconds())
             
             if diff < min_diff:
                 min_diff = diff
-                best_kp = float(kp_str)
+                best_kp = float(kp_val_raw)
 
         if best_kp is None:
             return fallback_data
