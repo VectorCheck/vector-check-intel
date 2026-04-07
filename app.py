@@ -461,20 +461,25 @@ def fetch_astronomy_cached(lat_val: float, lon_val: float, dt_iso_str: str, tz_n
 
 @st.cache_data(ttl=86400, show_spinner="Loading 30-year climate context...")
 def fetch_climate_context_cached(lat_val: float, lon_val: float, month_val: int) -> dict:
-    """Fetches 30-year ERA5 climate context with 24-hour cache.
+    """Fetches 25-year climate context with 24-hour cache.
+
+    Uses tiered fallback: ECCC station (Tier 1) -> NASA POWER (Tier 2).
+    Both sources are FREE with no API key required.
 
     Returns a dict (not a dataclass) because st.cache_data requires
     serializable return types.
     """
     sb = _get_supabase()
-    api_key = st.secrets.get("open_meteo", {}).get("api_key", None)
 
-    ctx = get_climate_context(lat_val, lon_val, month_val, sb_client=sb, api_key=api_key)
+    ctx = get_climate_context(lat_val, lon_val, month_val, sb_client=sb)
 
     return {
         "lat_bin": ctx.lat_bin, "lon_bin": ctx.lon_bin,
         "month": ctx.month, "years_range": ctx.years_range,
         "error": ctx.error, "cached": ctx.cached,
+        "source": ctx.source,
+        "source_label": ctx.source_label,
+        "source_distance_km": ctx.source_distance_km,
         "wind": {"p10": ctx.wind.p10, "p25": ctx.wind.p25, "p50": ctx.wind.p50,
                  "p75": ctx.wind.p75, "p90": ctx.wind.p90, "p99": ctx.wind.p99,
                  "mean": ctx.wind.mean, "n": ctx.wind.sample_count},
@@ -1429,7 +1434,31 @@ else:
                     "July", "August", "September", "October", "November", "December"]
     _month_name = _month_names[climate["month"]]
 
-    st.caption(f"30-year ERA5 reanalysis ({climate['years_range']}) \u00b7 {regional_name} \u00b7 {_month_name}")
+    st.caption(f"25-year hourly normals ({climate['years_range']}) \u00b7 {regional_name} \u00b7 {_month_name}")
+
+    # Source badge — green for ECCC station observations, amber for NASA POWER reanalysis
+    _src = climate.get("source", "")
+    _src_label = climate.get("source_label", "Unknown source")
+    if _src == "ECCC":
+        _src_color = "#2abf2a"
+        _src_bg = "rgba(42, 191, 42, 0.12)"
+        _src_desc = "station observations"
+    elif _src == "NASA_POWER":
+        _src_color = "#E58E26"
+        _src_bg = "rgba(229, 142, 38, 0.12)"
+        _src_desc = "gridded reanalysis"
+    else:
+        _src_color = "#8E949E"
+        _src_bg = "rgba(142, 148, 158, 0.12)"
+        _src_desc = ""
+
+    st.markdown(f"""
+    <div style="display:inline-flex;align-items:center;gap:6px;background:{_src_bg};border:0.5px solid {_src_color};border-radius:12px;padding:3px 10px;margin-bottom:12px;">
+        <span style="width:6px;height:6px;border-radius:50%;background:{_src_color};display:inline-block;"></span>
+        <span style="font-size:0.7rem;color:{_src_color};font-weight:500;">Source: {_src_label}</span>
+        <span style="font-size:0.65rem;color:#8E949E;font-style:italic;">{_src_desc}</span>
+    </div>
+    """, unsafe_allow_html=True)
 
     clim_left, clim_right = st.columns([3, 2])
 
