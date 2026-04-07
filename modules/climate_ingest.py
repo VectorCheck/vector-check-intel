@@ -1,37 +1,32 @@
 """
-VECTOR CHECK AERIAL GROUP INC. — Climate Context Engine
+VECTOR CHECK AERIAL GROUP INC. — Climate Context Engine (Tiered)
 
-Fetches 30-year ERA5 reanalysis data from the Open-Meteo Historical Weather API,
-computes percentile distributions and wind direction frequency tables, caches
-the results in Supabase, and provides fast runtime lookups for the dashboard.
+Fetches 25-year hourly historical climate data from a tiered set of sources:
+
+  TIER 1: ECCC GeoMet OGC API (api.weather.gc.ca)
+          - Real station observations from Canadian weather stations
+          - Free, no auth, commercial use allowed (Government of Canada open data)
+          - Used when an hourly station exists within 30 km of the query point
+
+  TIER 2: NASA POWER Hourly Point API (power.larc.nasa.gov)
+          - Gridded reanalysis (MERRA-2) at ~50 km resolution
+          - Free, no auth, no commercial restrictions (US government open data)
+          - Global coverage, used as fallback when no ECCC station nearby
 
 ARCHITECTURE:
-    1. Dashboard requests climate context for (lat, lon, month)
-    2. get_climate_context() checks Supabase cache first
-    3. On cache miss: fetches ERA5 in 5-year chunks, computes stats, stores
-    4. Returns ClimateContext dataclass with percentiles + wind rose data
-
-API ENDPOINT:
-    Standard:     https://archive-api.open-meteo.com/v1/archive
-    Customer:     https://customer-archive-api.open-meteo.com/v1/archive?apikey=KEY
-
-API CALL COST (Open-Meteo Professional Plan):
-    5 variables × 30 days = ~2 fractional API calls per year-chunk
-    6 chunks (5 years each) × 2 calls = ~12 calls per location/month
-    12 months × 5 detachments = ~720 calls total bootstrap (of 5M monthly)
-
-SUPABASE TABLES (run once — schema at bottom of this file):
-    climate_percentiles  — P10/P25/P50/P75/P90/P99 per variable per site/month
-    climate_wind_rose    — 8-direction × 3-speed frequency table per site/month
-
-VARIABLES FETCHED:
-    temperature_2m, relative_humidity_2m, wind_speed_10m,
-    wind_direction_10m, surface_pressure
+    Dashboard → get_climate_context(lat, lon, month)
+        → check Supabase cache
+        → on miss: try ECCC station first
+        → if no station within 30 km: try NASA POWER
+        → cache result with source tag
+        → return ClimateContext with source badge data
 """
 
 import urllib.request
+import urllib.parse
 import json
 import math
+import time
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -42,39 +37,35 @@ logger = logging.getLogger("arms.climate")
 # CONFIGURATION
 # =============================================================================
 
-# Open-Meteo Historical Weather API (ERA5 reanalysis)
-# If you have a paid API key, use the customer endpoint for reliability.
-# Set OPEN_METEO_API_KEY to None to use the free endpoint.
-ARCHIVE_BASE_URL = "https://archive-api.open-meteo.com/v1/archive"
-CUSTOMER_ARCHIVE_URL = "https://customer-archive-api.open-meteo.com/v1/archive"
+ECCC_STATIONS_URL = "https://api.weather.gc.ca/collections/climate-stations/items"
+ECCC_HOURLY_URL = "https://api.weather.gc.ca/collections/climate-hourly/items"
+NASA_POWER_URL = "https://power.larc.nasa.gov/api/temporal/hourly/point"
 
-# Variables to fetch — kept minimal to reduce API call cost
-_HOURLY_VARS = "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,surface_pressure"
-
-# ERA5 date range for climate normals
-CLIMATE_START_YEAR = 1995
+# Date range — NASA POWER's earliest hourly data is 2001
+CLIMATE_START_YEAR = 2001
 CLIMATE_END_YEAR = 2025
-CHUNK_SIZE_YEARS = 5  # Fetch in 5-year blocks to avoid timeouts
 
-# Wind speed bins (knots) for the directional bar gauge
-WIND_SPEED_BINS = [(0, 10), (10, 20), (20, 999)]
-WIND_SPEED_BIN_LABELS = ["0-10 kt", "10-20 kt", "20+ kt"]
+ECCC_MAX_STATION_DISTANCE_KM = 30.0
+ECCC_BBOX_PADDING_DEG = 0.4
 
-# 8-point compass for wind direction binning
+SPATIAL_BIN_RESOLUTION = 0.1
+
+SOURCE_ECCC = "ECCC"
+SOURCE_NASA_POWER = "NASA_POWER"
+
+REQUEST_TIMEOUT_S = 30
+REQUEST_DELAY_S = 0.4
+
+KMH_TO_KT = 0.539957
+MS_TO_KT = 1.94384
+KPA_TO_HPA = 10.0
+
 COMPASS_DIRS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
-# Supabase table names
 PERCENTILE_TABLE = "climate_percentiles"
 WIND_ROSE_TABLE = "climate_wind_rose"
 
-# Spatial binning — round lat/lon to 0.1° for cache key
-# ERA5 is 0.25° resolution, so 0.1° gives adequate granularity
-SPATIAL_BIN_RESOLUTION = 0.1
-
-# km/h to knots conversion (Open-Meteo ERA5 returns km/h)
-KMH_TO_KT = 0.539957
-
-_REQUEST_TIMEOUT_S = 30  # ERA5 queries can be slow
+USER_AGENT = "VectorCheck-ARMS/2.1 (atmospheric risk management)"
 
 
 # =============================================================================
@@ -83,10 +74,9 @@ _REQUEST_TIMEOUT_S = 30  # ERA5 queries can be slow
 
 @dataclass
 class VariablePercentiles:
-    """Percentile distribution for a single weather variable."""
     p10: float = 0.0
     p25: float = 0.0
-    p50: float = 0.0   # median — the "30-year average" anchor
+    p50: float = 0.0
     p75: float = 0.0
     p90: float = 0.0
     p99: float = 0.0
@@ -96,18 +86,16 @@ class VariablePercentiles:
 
 @dataclass
 class WindRoseBin:
-    """Frequency data for one compass direction."""
     direction: str = ""
     total_pct: float = 0.0
-    calm_pct: float = 0.0      # 0-10 kt
-    moderate_pct: float = 0.0  # 10-20 kt
-    strong_pct: float = 0.0    # 20+ kt
+    calm_pct: float = 0.0
+    moderate_pct: float = 0.0
+    strong_pct: float = 0.0
     avg_speed_kt: float = 0.0
 
 
 @dataclass
 class ClimateContext:
-    """Complete climate context for a location and month."""
     lat_bin: float = 0.0
     lon_bin: float = 0.0
     month: int = 1
@@ -118,136 +106,251 @@ class ClimateContext:
     pressure: VariablePercentiles = field(default_factory=VariablePercentiles)
     rh: VariablePercentiles = field(default_factory=VariablePercentiles)
 
-    wind_rose: list[WindRoseBin] = field(default_factory=list)
+    wind_rose: list = field(default_factory=list)
     prevailing_dir: str = ""
     prevailing_pct: float = 0.0
+
+    source: str = ""
+    source_label: str = ""
+    source_distance_km: float = 0.0
 
     cached: bool = False
     error: str = ""
 
-    def get_percentile_rank(self, variable: str, value: float) -> int:
-        """Returns approximate percentile rank (0-100) for a value against the distribution."""
-        vp = getattr(self, variable, None)
-        if vp is None or vp.sample_count == 0:
-            return 50
 
-        if value <= vp.p10:
-            return int(10 * (value / max(0.01, vp.p10)))
-        elif value <= vp.p25:
-            return int(10 + 15 * ((value - vp.p10) / max(0.01, vp.p25 - vp.p10)))
-        elif value <= vp.p50:
-            return int(25 + 25 * ((value - vp.p25) / max(0.01, vp.p50 - vp.p25)))
-        elif value <= vp.p75:
-            return int(50 + 25 * ((value - vp.p50) / max(0.01, vp.p75 - vp.p50)))
-        elif value <= vp.p90:
-            return int(75 + 15 * ((value - vp.p75) / max(0.01, vp.p90 - vp.p75)))
-        elif value <= vp.p99:
-            return int(90 + 9 * ((value - vp.p90) / max(0.01, vp.p99 - vp.p90)))
-        else:
-            return 99
+# =============================================================================
+# HELPERS
+# =============================================================================
 
-    def format_percentile_label(self, percentile: int) -> tuple[str, str]:
-        """Returns (label, css_class) for a percentile value."""
-        if percentile >= 90:
-            return f"P{percentile} — Anomalous", "pH"
-        elif percentile >= 75:
-            return f"P{percentile} — Elevated", "pM"
-        elif percentile <= 10:
-            return f"P{percentile} — Unusually low", "pH"
-        elif percentile <= 25:
-            return f"P{percentile} — Below avg", "pM"
-        else:
-            return f"P{percentile} — Normal", "pL"
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _bin_coord(val: float) -> float:
+    return round(round(val / SPATIAL_BIN_RESOLUTION) * SPATIAL_BIN_RESOLUTION, 4)
 
 
 # =============================================================================
-# API FETCHING
+# TIER 1 — ECCC
 # =============================================================================
 
-def _build_archive_url(
-    lat: float,
-    lon: float,
-    start_date: str,
-    end_date: str,
-    api_key: str | None = None,
-) -> str:
-    """Constructs the Open-Meteo Historical Weather API URL."""
-    base = CUSTOMER_ARCHIVE_URL if api_key else ARCHIVE_BASE_URL
-    url = (
-        f"{base}?latitude={lat}&longitude={lon}"
-        f"&start_date={start_date}&end_date={end_date}"
-        f"&hourly={_HOURLY_VARS}&timezone=UTC"
-    )
-    if api_key:
-        url += f"&apikey={api_key}"
-    return url
+def _find_nearest_eccc_station(lat: float, lon: float):
+    pad = ECCC_BBOX_PADDING_DEG
+    bbox = f"{lon - pad},{lat - pad},{lon + pad},{lat + pad}"
 
+    params = {
+        "bbox": bbox,
+        "HAS_HOURLY_DATA": "Y",
+        "f": "json",
+        "limit": "200",
+    }
+    url = f"{ECCC_STATIONS_URL}?{urllib.parse.urlencode(params)}"
 
-def _fetch_era5_chunk(
-    lat: float,
-    lon: float,
-    start_date: str,
-    end_date: str,
-    api_key: str | None = None,
-) -> dict | None:
-    """Fetches one chunk of ERA5 data. Returns parsed JSON or None on failure."""
-    url = _build_archive_url(lat, lon, start_date, end_date, api_key)
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "VectorCheck-ARMS/2.1"})
-        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_S) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        logger.warning("ERA5 fetch failed for %s to %s: %s", start_date, end_date, e)
+        logger.warning("ECCC station search failed: %s", e)
         return None
 
+    features = data.get("features", [])
+    if not features:
+        return None
 
-def _fetch_full_era5(
-    lat: float,
-    lon: float,
-    month: int,
-    api_key: str | None = None,
-) -> dict:
-    """Fetches ERA5 data for a single calendar month across CLIMATE_START_YEAR–CLIMATE_END_YEAR.
+    best = None
+    best_dist = float("inf")
 
-    Splits into CHUNK_SIZE_YEARS blocks to avoid request timeouts.
-    Returns a merged hourly dict with all variables as flat lists.
-    """
-    import calendar
+    for feat in features:
+        props = feat.get("properties", {})
+        coords = feat.get("geometry", {}).get("coordinates", [])
+        if not coords or len(coords) < 2:
+            continue
 
-    merged: dict[str, list] = {
-        "temperature_2m": [],
-        "relative_humidity_2m": [],
-        "wind_speed_10m": [],
-        "wind_direction_10m": [],
-        "surface_pressure": [],
+        try:
+            stn_lon, stn_lat = float(coords[0]), float(coords[1])
+        except (TypeError, ValueError):
+            continue
+
+        dist = _haversine_km(lat, lon, stn_lat, stn_lon)
+        if dist > ECCC_MAX_STATION_DISTANCE_KM:
+            continue
+
+        stn_id = (
+            props.get("CLIMATE_IDENTIFIER")
+            or props.get("STN_ID")
+            or props.get("STATION_ID")
+        )
+        if not stn_id:
+            continue
+
+        last_date = props.get("LAST_DATE", "")
+        if last_date and isinstance(last_date, str) and len(last_date) >= 4:
+            try:
+                if int(last_date[:4]) < CLIMATE_START_YEAR:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        if dist < best_dist:
+            best_dist = dist
+            best = {
+                "station_id": str(stn_id),
+                "station_name": props.get("STATION_NAME", "Unknown Station"),
+                "distance_km": round(dist, 1),
+            }
+
+    return best
+
+
+def _fetch_eccc_year(station_id: str, year: int):
+    params = {
+        "CLIMATE_IDENTIFIER": station_id,
+        "datetime": f"{year}-01-01 00:00:00/{year}-12-31 23:59:59",
+        "f": "json",
+        "limit": "10000",
+        "sortby": "LOCAL_DATE",
+    }
+    url = f"{ECCC_HOURLY_URL}?{urllib.parse.urlencode(params)}"
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("ECCC hourly fetch failed for %s year %d: %s", station_id, year, e)
+        return None
+
+    features = data.get("features", [])
+    if not features:
+        return None
+
+    out = {
+        "wind_kt": [], "temp_c": [], "rh": [],
+        "pressure_hpa": [], "wind_dir": [], "timestamps": [],
     }
 
-    for chunk_start in range(CLIMATE_START_YEAR, CLIMATE_END_YEAR, CHUNK_SIZE_YEARS):
-        chunk_end = min(chunk_start + CHUNK_SIZE_YEARS - 1, CLIMATE_END_YEAR - 1)
+    for feat in features:
+        p = feat.get("properties", {})
+        ts = p.get("LOCAL_DATE") or p.get("UTC_DATE")
+        if not ts or not isinstance(ts, str):
+            continue
+        out["timestamps"].append(ts)
 
-        for year in range(chunk_start, chunk_end + 1):
-            last_day = calendar.monthrange(year, month)[1]
-            start_date = f"{year}-{month:02d}-01"
-            end_date = f"{year}-{month:02d}-{last_day:02d}"
+        t = p.get("TEMP")
+        out["temp_c"].append(float(t) if t is not None else None)
 
-            data = _fetch_era5_chunk(lat, lon, start_date, end_date, api_key)
-            if data is None or "hourly" not in data:
-                continue
+        rh = p.get("REL_HUM")
+        out["rh"].append(float(rh) if rh is not None else None)
 
-            hourly = data["hourly"]
-            for var in merged:
-                values = hourly.get(var, [])
-                merged[var].extend(values)
+        ws = p.get("WIND_SPD")
+        out["wind_kt"].append(float(ws) * KMH_TO_KT if ws is not None else None)
 
-    return merged
+        wd = p.get("WIND_DIR")
+        out["wind_dir"].append(float(wd) * 10.0 if wd is not None else None)
+
+        sp = p.get("STATION_PRESSURE")
+        out["pressure_hpa"].append(float(sp) * KPA_TO_HPA if sp is not None else None)
+
+    return out
 
 
 # =============================================================================
-# STATISTICS COMPUTATION
+# TIER 2 — NASA POWER
 # =============================================================================
 
-def _compute_percentiles(values: list[float]) -> VariablePercentiles:
-    """Computes percentile distribution from a list of float values."""
+def _fetch_nasa_power_year(lat: float, lon: float, year: int):
+    params = {
+        "parameters": "T2M,RH2M,WS10M,WD10M,PS",
+        "community": "RE",
+        "longitude": str(lon),
+        "latitude": str(lat),
+        "start": f"{year}0101",
+        "end": f"{year}1231",
+        "format": "JSON",
+        "time-standard": "UTC",
+    }
+    url = f"{NASA_POWER_URL}?{urllib.parse.urlencode(params)}"
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("NASA POWER fetch failed for %f,%f year %d: %s", lat, lon, year, e)
+        return None
+
+    try:
+        params_data = data["properties"]["parameter"]
+    except (KeyError, TypeError):
+        return None
+
+    t2m = params_data.get("T2M", {})
+    rh2m = params_data.get("RH2M", {})
+    ws10m = params_data.get("WS10M", {})
+    wd10m = params_data.get("WD10M", {})
+    ps = params_data.get("PS", {})
+
+    out = {
+        "wind_kt": [], "temp_c": [], "rh": [],
+        "pressure_hpa": [], "wind_dir": [], "timestamps": [],
+    }
+
+    NA = -999.0
+    for ts in sorted(t2m.keys()):
+        out["timestamps"].append(ts)
+
+        t_val = t2m.get(ts)
+        out["temp_c"].append(float(t_val) if t_val is not None and t_val != NA else None)
+
+        rh_val = rh2m.get(ts)
+        out["rh"].append(float(rh_val) if rh_val is not None and rh_val != NA else None)
+
+        ws_val = ws10m.get(ts)
+        out["wind_kt"].append(float(ws_val) * MS_TO_KT if ws_val is not None and ws_val != NA else None)
+
+        wd_val = wd10m.get(ts)
+        out["wind_dir"].append(float(wd_val) if wd_val is not None and wd_val != NA else None)
+
+        ps_val = ps.get(ts)
+        out["pressure_hpa"].append(float(ps_val) * KPA_TO_HPA if ps_val is not None and ps_val != NA else None)
+
+    return out
+
+
+# =============================================================================
+# DATA UTILITIES
+# =============================================================================
+
+def _filter_to_month(year_data: dict, month: int) -> dict:
+    filtered = {k: [] for k in year_data.keys()}
+    for i, ts in enumerate(year_data["timestamps"]):
+        try:
+            ts_month = int(ts[5:7]) if "-" in ts else int(ts[4:6])
+        except (ValueError, IndexError):
+            continue
+        if ts_month == month:
+            for k in year_data.keys():
+                filtered[k].append(year_data[k][i])
+    return filtered
+
+
+def _merge_data(merged: dict, new: dict) -> None:
+    for k in merged.keys():
+        merged[k].extend(new.get(k, []))
+
+
+# =============================================================================
+# STATISTICS
+# =============================================================================
+
+def _compute_percentiles(values: list) -> VariablePercentiles:
     clean = sorted(v for v in values if v is not None)
     n = len(clean)
     if n == 0:
@@ -261,144 +364,125 @@ def _compute_percentiles(values: list[float]) -> VariablePercentiles:
         return round(clean[lo] + frac * (clean[hi] - clean[lo]), 2)
 
     return VariablePercentiles(
-        p10=pct(10),
-        p25=pct(25),
-        p50=pct(50),
-        p75=pct(75),
-        p90=pct(90),
-        p99=pct(99),
+        p10=pct(10), p25=pct(25), p50=pct(50),
+        p75=pct(75), p90=pct(90), p99=pct(99),
         mean=round(sum(clean) / n, 2),
         sample_count=n,
     )
 
 
-def _compute_wind_rose(
-    speeds_kmh: list[float | None],
-    directions: list[float | None],
-) -> list[WindRoseBin]:
-    """Computes 8-direction wind frequency table with 3 speed bins.
-
-    Args:
-        speeds_kmh: Wind speeds in km/h (Open-Meteo ERA5 native unit)
-        directions: Wind directions in degrees (meteorological convention)
-
-    Returns:
-        List of 8 WindRoseBin objects, sorted descending by total_pct.
-    """
-    # Initialize counters: {dir_name: {bin_idx: count, "speeds": [...]}}
-    bins: dict[str, dict] = {}
-    for d in COMPASS_DIRS:
-        bins[d] = {0: 0, 1: 0, 2: 0, "speeds": [], "total": 0}
-
+def _compute_wind_rose(speeds_kt: list, directions: list) -> list:
+    bins = {d: {0: 0, 1: 0, 2: 0, "speeds": [], "total": 0} for d in COMPASS_DIRS}
     total_valid = 0
 
-    for spd_raw, dir_raw in zip(speeds_kmh, directions):
-        if spd_raw is None or dir_raw is None:
+    for spd, deg in zip(speeds_kt, directions):
+        if spd is None or deg is None:
+            continue
+        try:
+            spd_f = float(spd)
+            deg_f = float(deg)
+        except (TypeError, ValueError):
             continue
 
-        spd_kt = float(spd_raw) * KMH_TO_KT
-        dir_deg = float(dir_raw)
-
-        # Map direction to 8-point compass
-        dir_idx = int(round(dir_deg / 45.0)) % 8
+        dir_idx = int(round(deg_f / 45.0)) % 8
         dir_name = COMPASS_DIRS[dir_idx]
 
-        # Map speed to bin
-        if spd_kt < 10:
-            bin_idx = 0
-        elif spd_kt < 20:
-            bin_idx = 1
-        else:
-            bin_idx = 2
+        if spd_f < 10:   bin_idx = 0
+        elif spd_f < 20: bin_idx = 1
+        else:            bin_idx = 2
 
         bins[dir_name][bin_idx] += 1
-        bins[dir_name]["speeds"].append(spd_kt)
+        bins[dir_name]["speeds"].append(spd_f)
         bins[dir_name]["total"] += 1
         total_valid += 1
 
     if total_valid == 0:
         return [WindRoseBin(direction=d) for d in COMPASS_DIRS]
 
-    result: list[WindRoseBin] = []
+    result = []
     for d in COMPASS_DIRS:
         b = bins[d]
         total = b["total"]
-        total_pct = round(100.0 * total / total_valid, 1)
         avg_spd = round(sum(b["speeds"]) / len(b["speeds"]), 1) if b["speeds"] else 0.0
-
         result.append(WindRoseBin(
             direction=d,
-            total_pct=total_pct,
+            total_pct=round(100.0 * total / total_valid, 1),
             calm_pct=round(100.0 * b[0] / total_valid, 1),
             moderate_pct=round(100.0 * b[1] / total_valid, 1),
             strong_pct=round(100.0 * b[2] / total_valid, 1),
             avg_speed_kt=avg_spd,
         ))
 
-    # Sort descending by total percentage
     result.sort(key=lambda x: x.total_pct, reverse=True)
     return result
 
 
+def _build_context(merged, lat_bin, lon_bin, month, source, source_label, distance_km):
+    ctx = ClimateContext(
+        lat_bin=lat_bin, lon_bin=lon_bin, month=month,
+        years_range=f"{CLIMATE_START_YEAR}\u2013{CLIMATE_END_YEAR}",
+        source=source, source_label=source_label, source_distance_km=distance_km,
+    )
+    ctx.wind = _compute_percentiles(merged["wind_kt"])
+    ctx.temp = _compute_percentiles(merged["temp_c"])
+    ctx.pressure = _compute_percentiles(merged["pressure_hpa"])
+    ctx.rh = _compute_percentiles(merged["rh"])
+    ctx.wind_rose = _compute_wind_rose(merged["wind_kt"], merged["wind_dir"])
+
+    if ctx.wind_rose:
+        top = ctx.wind_rose[0]
+        if len(ctx.wind_rose) >= 2:
+            second = ctx.wind_rose[1]
+            ctx.prevailing_dir = f"{top.direction} / {second.direction}"
+            ctx.prevailing_pct = round(top.total_pct + second.total_pct, 1)
+        else:
+            ctx.prevailing_dir = top.direction
+            ctx.prevailing_pct = top.total_pct
+
+    return ctx
+
+
 # =============================================================================
-# SUPABASE CACHE LAYER
+# SUPABASE CACHE
 # =============================================================================
 
-def _bin_coord(val: float) -> float:
-    """Rounds a coordinate to the spatial bin resolution."""
-    return round(round(val / SPATIAL_BIN_RESOLUTION) * SPATIAL_BIN_RESOLUTION, 4)
-
-
-def _load_from_cache(sb_client, lat_bin: float, lon_bin: float, month: int) -> ClimateContext | None:
-    """Attempts to load cached climate context from Supabase.
-
-    Returns a fully populated ClimateContext on hit, or None on miss/error.
-    """
+def _load_from_cache(sb_client, lat_bin, lon_bin, month):
     try:
-        # Load percentiles
         pct_result = (
             sb_client.table(PERCENTILE_TABLE)
             .select("*")
-            .eq("lat_bin", lat_bin)
-            .eq("lon_bin", lon_bin)
-            .eq("month", month)
+            .eq("lat_bin", lat_bin).eq("lon_bin", lon_bin).eq("month", month)
             .execute()
         )
         if not pct_result.data:
             return None
 
+        first = pct_result.data[0]
         ctx = ClimateContext(
-            lat_bin=lat_bin,
-            lon_bin=lon_bin,
-            month=month,
-            years_range=f"{CLIMATE_START_YEAR}–{CLIMATE_END_YEAR}",
+            lat_bin=lat_bin, lon_bin=lon_bin, month=month,
+            years_range=f"{CLIMATE_START_YEAR}\u2013{CLIMATE_END_YEAR}",
             cached=True,
+            source=first.get("source", ""),
+            source_label=first.get("source_label", ""),
+            source_distance_km=first.get("source_distance_km", 0.0) or 0.0,
         )
 
         for row in pct_result.data:
             vp = VariablePercentiles(
                 p10=row["p10"], p25=row["p25"], p50=row["p50"],
                 p75=row["p75"], p90=row["p90"], p99=row["p99"],
-                mean=row["mean_val"],
-                sample_count=row["sample_count"],
+                mean=row["mean_val"], sample_count=row["sample_count"],
             )
-            var_name = row["variable"]
-            if var_name == "wind":
-                ctx.wind = vp
-            elif var_name == "temp":
-                ctx.temp = vp
-            elif var_name == "pressure":
-                ctx.pressure = vp
-            elif var_name == "rh":
-                ctx.rh = vp
+            v = row["variable"]
+            if v == "wind":     ctx.wind = vp
+            elif v == "temp":   ctx.temp = vp
+            elif v == "pressure": ctx.pressure = vp
+            elif v == "rh":     ctx.rh = vp
 
-        # Load wind rose
         wr_result = (
             sb_client.table(WIND_ROSE_TABLE)
             .select("*")
-            .eq("lat_bin", lat_bin)
-            .eq("lon_bin", lon_bin)
-            .eq("month", month)
+            .eq("lat_bin", lat_bin).eq("lon_bin", lon_bin).eq("month", month)
             .order("total_pct", desc=True)
             .execute()
         )
@@ -414,227 +498,186 @@ def _load_from_cache(sb_client, lat_bin: float, lon_bin: float, month: int) -> C
                 ))
             if ctx.wind_rose:
                 top = ctx.wind_rose[0]
-                # Check if top two are from the same quadrant for "W/NW" style labelling
                 if len(ctx.wind_rose) >= 2:
                     second = ctx.wind_rose[1]
-                    combined = top.total_pct + second.total_pct
                     ctx.prevailing_dir = f"{top.direction} / {second.direction}"
-                    ctx.prevailing_pct = round(combined, 1)
+                    ctx.prevailing_pct = round(top.total_pct + second.total_pct, 1)
                 else:
                     ctx.prevailing_dir = top.direction
                     ctx.prevailing_pct = top.total_pct
 
         return ctx
-
     except Exception as e:
         logger.debug("Climate cache read failed: %s", e)
         return None
 
 
 def _save_to_cache(sb_client, ctx: ClimateContext) -> None:
-    """Persists computed climate context to Supabase."""
     try:
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Upsert percentiles
         for var_name, vp in [("wind", ctx.wind), ("temp", ctx.temp),
                              ("pressure", ctx.pressure), ("rh", ctx.rh)]:
             sb_client.table(PERCENTILE_TABLE).upsert({
-                "lat_bin": ctx.lat_bin,
-                "lon_bin": ctx.lon_bin,
-                "month": ctx.month,
-                "variable": var_name,
+                "lat_bin": ctx.lat_bin, "lon_bin": ctx.lon_bin,
+                "month": ctx.month, "variable": var_name,
                 "p10": vp.p10, "p25": vp.p25, "p50": vp.p50,
                 "p75": vp.p75, "p90": vp.p90, "p99": vp.p99,
-                "mean_val": vp.mean,
-                "sample_count": vp.sample_count,
+                "mean_val": vp.mean, "sample_count": vp.sample_count,
+                "source": ctx.source, "source_label": ctx.source_label,
+                "source_distance_km": ctx.source_distance_km,
                 "updated_at": now_iso,
             }).execute()
 
-        # Upsert wind rose
         for wr in ctx.wind_rose:
             sb_client.table(WIND_ROSE_TABLE).upsert({
-                "lat_bin": ctx.lat_bin,
-                "lon_bin": ctx.lon_bin,
-                "month": ctx.month,
-                "direction": wr.direction,
+                "lat_bin": ctx.lat_bin, "lon_bin": ctx.lon_bin,
+                "month": ctx.month, "direction": wr.direction,
                 "total_pct": wr.total_pct,
                 "calm_pct": wr.calm_pct,
                 "moderate_pct": wr.moderate_pct,
                 "strong_pct": wr.strong_pct,
                 "avg_speed_kt": wr.avg_speed_kt,
+                "source": ctx.source, "source_label": ctx.source_label,
                 "updated_at": now_iso,
             }).execute()
-
     except Exception as e:
         logger.warning("Climate cache write failed: %s", e)
 
 
 # =============================================================================
-# PUBLIC API
+# RUNTIME ENTRY POINT
 # =============================================================================
 
-def get_climate_context(
-    lat: float,
-    lon: float,
-    month: int,
-    sb_client=None,
-    api_key: str | None = None,
-) -> ClimateContext:
-    """Returns 30-year climate context for a location and calendar month.
+def get_climate_context(lat: float, lon: float, month: int, sb_client=None) -> ClimateContext:
+    """Returns climate context for one location and month using tiered fallback.
 
-    1. Checks Supabase cache (keyed by binned lat/lon + month)
-    2. On cache miss: fetches ERA5, computes stats, caches, returns
-    3. On API failure: returns ClimateContext with error message
-
-    Args:
-        lat:        Latitude (will be binned to 0.1°)
-        lon:        Longitude (will be binned to 0.1°)
-        month:      Calendar month (1-12)
-        sb_client:  Supabase client (optional — cache disabled if None)
-        api_key:    Open-Meteo API key (optional — uses free endpoint if None)
-
-    Returns:
-        ClimateContext with percentiles, wind rose, and helper methods
+    Cache → ECCC station → NASA POWER → graceful failure.
     """
     lat_bin = _bin_coord(lat)
     lon_bin = _bin_coord(lon)
 
-    # --- Cache check ---
     if sb_client is not None:
         cached = _load_from_cache(sb_client, lat_bin, lon_bin, month)
-        if cached is not None:
+        if cached is not None and cached.wind.sample_count > 0:
             return cached
 
-    # --- Fetch ERA5 ---
-    merged = _fetch_full_era5(lat, lon, month, api_key)
+    # Tier 1: ECCC
+    station = _find_nearest_eccc_station(lat, lon)
+    if station is not None:
+        merged = {k: [] for k in ["wind_kt", "temp_c", "rh", "pressure_hpa", "wind_dir", "timestamps"]}
+        for year in range(CLIMATE_START_YEAR, CLIMATE_END_YEAR + 1):
+            year_data = _fetch_eccc_year(station["station_id"], year)
+            if year_data is not None:
+                _merge_data(merged, _filter_to_month(year_data, month))
+            time.sleep(REQUEST_DELAY_S)
 
-    wind_raw = merged.get("wind_speed_10m", [])
-    if not wind_raw or len(wind_raw) < 100:
-        return ClimateContext(
-            lat_bin=lat_bin, lon_bin=lon_bin, month=month,
-            error="Insufficient ERA5 data returned. Check API key or endpoint access.",
+        if len(merged["wind_kt"]) >= 100:
+            ctx = _build_context(
+                merged, lat_bin, lon_bin, month,
+                source=SOURCE_ECCC,
+                source_label=f"ECCC {station['station_name']} \u00b7 {station['distance_km']} km",
+                distance_km=station["distance_km"],
+            )
+            if sb_client is not None:
+                _save_to_cache(sb_client, ctx)
+            return ctx
+
+    # Tier 2: NASA POWER
+    merged = {k: [] for k in ["wind_kt", "temp_c", "rh", "pressure_hpa", "wind_dir", "timestamps"]}
+    for year in range(CLIMATE_START_YEAR, CLIMATE_END_YEAR + 1):
+        year_data = _fetch_nasa_power_year(lat, lon, year)
+        if year_data is not None:
+            _merge_data(merged, _filter_to_month(year_data, month))
+        time.sleep(REQUEST_DELAY_S)
+
+    if len(merged["wind_kt"]) >= 100:
+        ctx = _build_context(
+            merged, lat_bin, lon_bin, month,
+            source=SOURCE_NASA_POWER,
+            source_label="NASA POWER \u00b7 ~50 km grid",
+            distance_km=50.0,
         )
+        if sb_client is not None:
+            _save_to_cache(sb_client, ctx)
+        return ctx
 
-    # --- Convert wind speeds from km/h to knots ---
-    wind_kt = [v * KMH_TO_KT if v is not None else None for v in wind_raw]
-
-    # --- Compute percentiles ---
-    ctx = ClimateContext(
-        lat_bin=lat_bin,
-        lon_bin=lon_bin,
-        month=month,
-        years_range=f"{CLIMATE_START_YEAR}–{CLIMATE_END_YEAR}",
+    return ClimateContext(
+        lat_bin=lat_bin, lon_bin=lon_bin, month=month,
+        error="Both ECCC and NASA POWER unavailable for this location.",
     )
 
-    ctx.wind = _compute_percentiles(wind_kt)
-    ctx.temp = _compute_percentiles(merged.get("temperature_2m", []))
-    ctx.pressure = _compute_percentiles(merged.get("surface_pressure", []))
-    ctx.rh = _compute_percentiles(merged.get("relative_humidity_2m", []))
 
-    # --- Compute wind rose ---
-    ctx.wind_rose = _compute_wind_rose(
-        merged.get("wind_speed_10m", []),
-        merged.get("wind_direction_10m", []),
-    )
+# =============================================================================
+# BOOTSTRAP HELPER — All 12 months at one site, optimized
+# =============================================================================
 
-    if ctx.wind_rose:
-        top = ctx.wind_rose[0]
-        if len(ctx.wind_rose) >= 2:
-            second = ctx.wind_rose[1]
-            ctx.prevailing_dir = f"{top.direction} / {second.direction}"
-            ctx.prevailing_pct = round(top.total_pct + second.total_pct, 1)
+def bootstrap_site(lat: float, lon: float, sb_client) -> dict:
+    """Bootstraps all 12 months for one site with one fetch per year."""
+    lat_bin = _bin_coord(lat)
+    lon_bin = _bin_coord(lon)
+
+    station = _find_nearest_eccc_station(lat, lon)
+    if station is not None:
+        use_tier = "ECCC"
+        source = SOURCE_ECCC
+        source_label = f"ECCC {station['station_name']} \u00b7 {station['distance_km']} km"
+        distance_km = station["distance_km"]
+    else:
+        use_tier = "NASA_POWER"
+        source = SOURCE_NASA_POWER
+        source_label = "NASA POWER \u00b7 ~50 km grid"
+        distance_km = 50.0
+
+    monthly_buckets = {
+        m: {k: [] for k in ["wind_kt", "temp_c", "rh", "pressure_hpa", "wind_dir", "timestamps"]}
+        for m in range(1, 13)
+    }
+
+    years_succeeded = 0
+    years_failed = 0
+
+    for year in range(CLIMATE_START_YEAR, CLIMATE_END_YEAR + 1):
+        if use_tier == "ECCC":
+            year_data = _fetch_eccc_year(station["station_id"], year)
         else:
-            ctx.prevailing_dir = top.direction
-            ctx.prevailing_pct = top.total_pct
+            year_data = _fetch_nasa_power_year(lat, lon, year)
 
-    # --- Cache result ---
-    if sb_client is not None:
+        if year_data is None:
+            years_failed += 1
+            time.sleep(REQUEST_DELAY_S)
+            continue
+
+        years_succeeded += 1
+
+        for i, ts in enumerate(year_data["timestamps"]):
+            try:
+                m = int(ts[5:7]) if "-" in ts else int(ts[4:6])
+            except (ValueError, IndexError):
+                continue
+            if 1 <= m <= 12:
+                for k in monthly_buckets[m].keys():
+                    monthly_buckets[m][k].append(year_data[k][i])
+
+        time.sleep(REQUEST_DELAY_S)
+
+    months_saved = 0
+    for month in range(1, 13):
+        merged = monthly_buckets[month]
+        if len(merged["wind_kt"]) < 100:
+            continue
+        ctx = _build_context(
+            merged, lat_bin, lon_bin, month,
+            source=source, source_label=source_label, distance_km=distance_km,
+        )
         _save_to_cache(sb_client, ctx)
+        months_saved += 1
 
-    return ctx
-
-
-def compute_density_alt_percentile(
-    ctx: ClimateContext,
-    current_da: int,
-    elevation_ft: float,
-) -> tuple[int, VariablePercentiles]:
-    """Estimates density altitude percentile from temperature and pressure distributions.
-
-    Since ERA5 doesn't directly provide density altitude, we compute it from
-    the median temperature and pressure values using the same formula as physics.py,
-    then compare against the current DA.
-
-    Returns (percentile_rank, synthetic_da_percentiles).
-    """
-    from modules.physics import calculate_density_altitude
-
-    # Compute DA at key percentile breakpoints using T and P percentile combos
-    # Worst case DA = high temp + low pressure; best case = low temp + high pressure
-    da_values = []
-    for t_val in [ctx.temp.p10, ctx.temp.p25, ctx.temp.p50, ctx.temp.p75, ctx.temp.p90]:
-        for p_val in [ctx.pressure.p90, ctx.pressure.p75, ctx.pressure.p50, ctx.pressure.p25, ctx.pressure.p10]:
-            da = calculate_density_altitude(elevation_ft, t_val, p_val)
-            da_values.append(da)
-
-    da_values.sort()
-    da_pct = _compute_percentiles([float(v) for v in da_values])
-
-    rank = ctx.get_percentile_rank("temp", ctx.temp.p50)  # rough proxy
-    # Refine: where does current_da sit in the synthetic distribution
-    n = len(da_values)
-    if n > 0:
-        below = sum(1 for v in da_values if v <= current_da)
-        rank = int(100 * below / n)
-
-    return rank, da_pct
-
-
-# =============================================================================
-# SUPABASE SCHEMA — Run once in SQL Editor
-# =============================================================================
-SCHEMA_SQL = """
--- Climate percentile cache
--- Composite unique key: (lat_bin, lon_bin, month, variable)
-CREATE TABLE IF NOT EXISTS climate_percentiles (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    lat_bin      FLOAT NOT NULL,
-    lon_bin      FLOAT NOT NULL,
-    month        INT NOT NULL CHECK (month BETWEEN 1 AND 12),
-    variable     TEXT NOT NULL,       -- 'wind', 'temp', 'pressure', 'rh'
-    p10          FLOAT NOT NULL,
-    p25          FLOAT NOT NULL,
-    p50          FLOAT NOT NULL,
-    p75          FLOAT NOT NULL,
-    p90          FLOAT NOT NULL,
-    p99          FLOAT NOT NULL,
-    mean_val     FLOAT NOT NULL,
-    sample_count INT NOT NULL,
-    updated_at   TIMESTAMPTZ DEFAULT now(),
-    UNIQUE (lat_bin, lon_bin, month, variable)
-);
-
--- Wind direction frequency cache
--- Composite unique key: (lat_bin, lon_bin, month, direction)
-CREATE TABLE IF NOT EXISTS climate_wind_rose (
-    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    lat_bin       FLOAT NOT NULL,
-    lon_bin       FLOAT NOT NULL,
-    month         INT NOT NULL CHECK (month BETWEEN 1 AND 12),
-    direction     TEXT NOT NULL,      -- 'N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'
-    total_pct     FLOAT NOT NULL,
-    calm_pct      FLOAT NOT NULL,     -- 0-10 kt
-    moderate_pct  FLOAT NOT NULL,     -- 10-20 kt
-    strong_pct    FLOAT NOT NULL,     -- 20+ kt
-    avg_speed_kt  FLOAT NOT NULL,
-    updated_at    TIMESTAMPTZ DEFAULT now(),
-    UNIQUE (lat_bin, lon_bin, month, direction)
-);
-
--- Index for fast lookups by location + month
-CREATE INDEX IF NOT EXISTS idx_climate_pct_lookup
-    ON climate_percentiles (lat_bin, lon_bin, month);
-CREATE INDEX IF NOT EXISTS idx_climate_wr_lookup
-    ON climate_wind_rose (lat_bin, lon_bin, month);
-"""
+    return {
+        "tier": use_tier,
+        "source_label": source_label,
+        "years_succeeded": years_succeeded,
+        "years_failed": years_failed,
+        "months_saved": months_saved,
+        "station": station,
+    }
