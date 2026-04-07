@@ -1,41 +1,46 @@
 #!/usr/bin/env python3
 """
-VECTOR CHECK AERIAL GROUP INC. — Climate Bootstrap Script
+VECTOR CHECK AERIAL GROUP INC. — Climate Bootstrap Script (Tiered)
 
-Run once to pre-compute 30-year ERA5 climate normals for all VCAG
-detachment sites across all 12 months. Stores results in Supabase.
+Pre-computes 25-year hourly climate normals for all VCAG detachment sites
+across all 12 months. Uses tiered fallback:
+    - Tier 1: ECCC station observations (preferred)
+    - Tier 2: NASA POWER gridded reanalysis (fallback)
+
+Stores results in Supabase climate_percentiles and climate_wind_rose tables.
 
 USAGE:
     python bootstrap_climate.py
 
 PREREQUISITES:
-    - Open-Meteo Professional plan (for Historical Weather API access)
     - Supabase tables created (run supabase_climate_schema.sql first)
-    - Environment variables or .streamlit/secrets.toml configured:
-        SUPABASE_URL, SUPABASE_KEY, OPEN_METEO_API_KEY (optional)
+    - .streamlit/secrets.toml present with [supabase] block
 
 ESTIMATED RUNTIME:
-    ~10-15 minutes (5 sites × 12 months × 30 years of ERA5 data)
+    ~2 minutes per site (25 API calls per site at ~0.5s each)
+    Total for 5 sites: ~10 minutes
 
-ESTIMATED API COST:
-    ~720 fractional API calls (of 5M monthly Professional allowance)
+API COST:
+    Both ECCC and NASA POWER are FREE with no rate limits or commercial restrictions.
+    No API keys required.
+
+RE-RUN SAFETY:
+    Safe to re-run. Uses upsert to update existing rows. Idempotent.
 """
 
 import os
 import sys
 import time
 
-# Allow running from project root
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from supabase import create_client
-from modules.climate_ingest import get_climate_context
+from modules.climate_ingest import bootstrap_site
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-# VCAG Detachment Coordinates (same as USER_DEFAULTS in app.py)
 SITES = {
     "VCAG HQ (Belleville, ON)":   {"lat": 44.1628, "lon": -77.3832},
     "Vector1 (Cold Lake, AB)":    {"lat": 54.4642, "lon": -110.1825},
@@ -44,84 +49,97 @@ SITES = {
     "Vector4 (Toronto, ON)":      {"lat": 43.6532, "lon": -79.3832},
 }
 
-# Read secrets from environment or .streamlit/secrets.toml
+
 def _get_config():
-    """Reads Supabase and Open-Meteo config from environment or secrets file."""
-    # Try environment variables first
+    """Reads Supabase config from environment or .streamlit/secrets.toml."""
     sb_url = os.environ.get("SUPABASE_URL")
     sb_key = os.environ.get("SUPABASE_KEY")
-    om_key = os.environ.get("OPEN_METEO_API_KEY")
 
-    # Fallback: try parsing .streamlit/secrets.toml
     if not sb_url:
         try:
             import tomllib
-            with open(".streamlit/secrets.toml", "rb") as f:
-                secrets = tomllib.load(f)
-            sb_url = secrets.get("supabase", {}).get("url")
-            sb_key = secrets.get("supabase", {}).get("key")
-            om_key = secrets.get("open_meteo", {}).get("api_key")
-        except Exception:
-            pass
+        except ImportError:
+            try:
+                import tomli as tomllib
+            except ImportError:
+                tomllib = None
+
+        if tomllib is not None:
+            for path in (".streamlit/secrets.toml", "/app/.streamlit/secrets.toml"):
+                if os.path.exists(path):
+                    try:
+                        with open(path, "rb") as f:
+                            secrets = tomllib.load(f)
+                        sb_url = secrets.get("supabase", {}).get("url")
+                        sb_key = secrets.get("supabase", {}).get("key")
+                        if sb_url:
+                            break
+                    except Exception:
+                        pass
 
     if not sb_url or not sb_key:
         print("ERROR: SUPABASE_URL and SUPABASE_KEY must be set.")
         print("  Set as environment variables or in .streamlit/secrets.toml")
         sys.exit(1)
 
-    return sb_url, sb_key, om_key
+    return sb_url, sb_key
 
 
 def main():
-    sb_url, sb_key, om_key = _get_config()
+    sb_url, sb_key = _get_config()
     sb = create_client(sb_url, sb_key)
 
-    total_tasks = len(SITES) * 12
-    completed = 0
-    errors = 0
+    print("=" * 64)
+    print("VCAG Climate Bootstrap (Tiered)")
+    print("Tier 1: ECCC (api.weather.gc.ca) — station observations")
+    print("Tier 2: NASA POWER (power.larc.nasa.gov) — gridded fallback")
+    print(f"Sites: {len(SITES)} | Years: 2001\u20132025")
+    print("=" * 64)
 
-    print("=" * 60)
-    print("VCAG Climate Bootstrap — 30-Year ERA5 Normals")
-    print(f"Sites: {len(SITES)} | Months: 12 | Total: {total_tasks} computations")
-    print(f"API Key: {'Configured' if om_key else 'None (using free endpoint)'}")
-    print("=" * 60)
+    total_succeeded = 0
+    total_failed = 0
+    start_time = time.time()
 
-    for site_name, coords in SITES.items():
-        for month in range(1, 13):
-            completed += 1
-            month_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    for i, (site_name, coords) in enumerate(SITES.items(), 1):
+        print(f"\n[{i}/{len(SITES)}] {site_name}")
+        print(f"        Lat: {coords['lat']}, Lon: {coords['lon']}")
+        site_start = time.time()
 
-            print(f"  [{completed}/{total_tasks}] {site_name} — {month_names[month]}...", end=" ", flush=True)
+        try:
+            result = bootstrap_site(coords["lat"], coords["lon"], sb)
 
-            try:
-                ctx = get_climate_context(
-                    lat=coords["lat"],
-                    lon=coords["lon"],
-                    month=month,
-                    sb_client=sb,
-                    api_key=om_key,
-                )
+            elapsed = time.time() - site_start
 
-                if ctx.error:
-                    print(f"WARN: {ctx.error}")
-                    errors += 1
-                elif ctx.cached:
-                    print(f"CACHED (already computed)")
-                else:
-                    print(f"OK — {ctx.wind.sample_count:,} samples, prevailing {ctx.prevailing_dir}")
-            except Exception as e:
-                print(f"ERROR: {e}")
-                errors += 1
+            print(f"        Tier:   {result['tier']}")
+            print(f"        Source: {result['source_label']}")
+            if result["station"]:
+                print(f"        Station: {result['station']['station_name']} (ID: {result['station']['station_id']})")
+            print(f"        Years:  {result['years_succeeded']} succeeded, {result['years_failed']} failed")
+            print(f"        Months saved: {result['months_saved']}/12")
+            print(f"        Elapsed: {elapsed:.1f}s")
 
-            # Respectful rate limiting — 1 second between API calls
-            if not (ctx and ctx.cached):
-                time.sleep(1.0)
+            if result["months_saved"] > 0:
+                total_succeeded += 1
+            else:
+                total_failed += 1
+                print("        WARNING: No months saved \u2014 check API connectivity")
 
-    print("=" * 60)
-    print(f"Bootstrap complete. {completed - errors}/{completed} succeeded, {errors} errors.")
-    print("Verify with: SELECT * FROM climate_percentiles LIMIT 5;")
-    print("=" * 60)
+        except Exception as e:
+            print(f"        ERROR: {e}")
+            total_failed += 1
+
+    total_elapsed = time.time() - start_time
+
+    print()
+    print("=" * 64)
+    print(f"Bootstrap complete in {total_elapsed:.0f}s")
+    print(f"Sites succeeded: {total_succeeded}/{len(SITES)}")
+    print(f"Sites failed:    {total_failed}/{len(SITES)}")
+    print("=" * 64)
+    print()
+    print("Verify in Supabase SQL Editor with:")
+    print("  SELECT lat_bin, lon_bin, month, source_label, sample_count")
+    print("  FROM climate_percentiles WHERE variable = 'wind' ORDER BY lat_bin, month;")
 
 
 if __name__ == "__main__":
