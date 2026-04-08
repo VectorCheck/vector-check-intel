@@ -1478,6 +1478,149 @@ st.divider()
 
 
 # =============================================================================
+# ENTERPRISE PDF EXPORT ENGINE
+# FIX: Previously, generate_pdf_report() was called directly inside
+# st.download_button(data=...), causing a full PDF build on EVERY Streamlit
+# rerender. The PDF is now cached in session_state and only regenerated when
+# the forecast index, coordinates, model, or ICAO actually change.
+# =============================================================================
+
+def generate_pdf_report() -> bytes:
+    stn_display_str = f"{icao} | {stn_dist:.1f} km {stn_dir} of AO" if icao != "NONE" else "No valid ICAO within 50km."
+
+    pdf = FPDF()
+    pdf.add_page()
+
+    def safe_txt(txt: str) -> str:
+        return str(txt).replace('°', ' deg').encode('latin-1', 'replace').decode('latin-1')
+
+    pdf.set_font("helvetica", "B", 14)
+    pdf.cell(0, 8, "VECTOR CHECK AERIAL GROUP INC.", border=0, new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("helvetica", "I", 10)
+    pdf.cell(0, 6, "Atmospheric Risk Assessment (Operational Flight Briefing)", border=0, new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(5)
+
+    pdf.set_font("helvetica", "B", 10)
+    pdf.cell(40, 6, "Target Coordinates:", border=0)
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 6, safe_txt(f"{lat}, {lon}"), border=0, new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_font("helvetica", "B", 10)
+    pdf.cell(40, 6, "Regional Area:", border=0)
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 6, safe_txt(regional_name), border=0, new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_font("helvetica", "B", 10)
+    pdf.cell(40, 6, "Reference Station:", border=0)
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 6, safe_txt(stn_display_str), border=0, new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_font("helvetica", "B", 10)
+    pdf.cell(40, 6, "Model / Valid Time:", border=0)
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 6, safe_txt(f"{model_choice} | {selected_time_str}"), border=0, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(5)
+
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(0, 8, "FORECASTED SURFACE CONDITIONS", border=0, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", "", 10)
+    pdf.multi_cell(0, 6, safe_txt(
+        f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\n"
+        f"Wind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\n"
+        f"Weather: {weather_str} | Visibility: {vis_disp}\n"
+        f"Cloud Base: {c_base_disp} | Freezing Level: {frz_disp}"
+    ))
+    pdf.ln(5)
+
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(0, 8, "ASTRONOMICAL & SPACE WEATHER", border=0, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", "", 10)
+    pdf.multi_cell(0, 6, safe_txt(
+        f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
+        f"Moon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n"
+        f"Space Weather: Kp Index {space_data['kp']} | GNSS Risk: {space_data['risk']}"
+    ))
+    pdf.ln(5)
+
+    if icao != "NONE":
+        pdf.set_font("helvetica", "B", 12)
+        pdf.cell(0, 8, f"STATION ACTUALS ({icao})", border=0, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("helvetica", "B", 10)
+        pdf.cell(0, 6, "METAR:", border=0, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("helvetica", "", 9)
+        pdf.multi_cell(0, 5, safe_txt(clean_metar))
+        pdf.ln(2)
+        pdf.set_font("helvetica", "B", 10)
+        pdf.cell(0, 6, "TAF:", border=0, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("helvetica", "", 9)
+        pdf.multi_cell(0, 5, safe_txt(clean_taf))
+        pdf.ln(5)
+
+    def draw_table(title: str, df: pd.DataFrame) -> None:
+        pdf.set_font("helvetica", "B", 12)
+        pdf.cell(0, 8, title, border=0, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("helvetica", "B", 9)
+        col_names  = ["Alt (AGL)"] + list(df.columns)
+        col_widths = [25, 20, 25, 25, 30, 25]
+        for col_i, col in enumerate(col_names):
+            pdf.cell(col_widths[col_i], 8, safe_txt(str(col)), border=1, align='C')
+        pdf.ln(8)
+        pdf.set_font("helvetica", "", 9)
+        for row_label, row in df.iterrows():
+            pdf.cell(col_widths[0], 8, safe_txt(str(row_label)), border=1, align='C')
+            for val_i, val in enumerate(row):
+                pdf.cell(col_widths[val_i + 1], 8, safe_txt(str(val)), border=1, align='C')
+            pdf.ln(8)
+        pdf.ln(5)
+
+    draw_table("TACTICAL HAZARD STACK (0-400ft AGL)",      df_tactical)
+    draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)",  df_ext)
+
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(0, 8, "THERMODYNAMIC & AERODYNAMIC PROFILE", border=0, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", "", 10)
+    pdf.multi_cell(0, 6, safe_txt(
+        f"Precipitation Risk: {pop}% ({precip} mm)\n"
+        f"Density Altitude (DA): {density_alt:,} ft | PBL Height: {pbl_disp}\n"
+        f"Convective Available Potential Energy (CAPE): {cape} J/kg"
+    ))
+    pdf.ln(5)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp_name = tmp.name
+
+    try:
+        pdf.output(tmp_name)
+        with open(tmp_name, "rb") as f:
+            return f.read()
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+# Cache the PDF in session_state — only rebuild when the briefing state changes
+_pdf_cache_key = f"{lat}_{lon}_{forecast_idx}_{model_choice}_{icao}"
+if st.session_state.get("_pdf_cache_key") != _pdf_cache_key:
+    st.session_state["_pdf_bytes"]     = generate_pdf_report()
+    st.session_state["_pdf_cache_key"] = _pdf_cache_key
+
+
+def log_download_callback() -> None:
+    try: log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "DOWNLOAD_PDF")
+    except Exception: pass
+
+
+st.download_button(
+    label     = "Download Flight Briefing (PDF)",
+    data      = st.session_state["_pdf_bytes"],
+    file_name = f"VCAG_Briefing_{lat}_{lon}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+    mime      = "application/pdf",
+    on_click  = log_download_callback,
+)
+
+st.divider()
+
+# =============================================================================
 # CLIMATE CONTEXT PANEL
 # 30-year ERA5 reanalysis normals with percentile positioning and wind
 # direction frequency bars. Cached in Supabase after first computation.
@@ -1721,148 +1864,6 @@ else:
 st.divider()
 
 
-# =============================================================================
-# ENTERPRISE PDF EXPORT ENGINE
-# FIX: Previously, generate_pdf_report() was called directly inside
-# st.download_button(data=...), causing a full PDF build on EVERY Streamlit
-# rerender. The PDF is now cached in session_state and only regenerated when
-# the forecast index, coordinates, model, or ICAO actually change.
-# =============================================================================
-
-def generate_pdf_report() -> bytes:
-    stn_display_str = f"{icao} | {stn_dist:.1f} km {stn_dir} of AO" if icao != "NONE" else "No valid ICAO within 50km."
-
-    pdf = FPDF()
-    pdf.add_page()
-
-    def safe_txt(txt: str) -> str:
-        return str(txt).replace('°', ' deg').encode('latin-1', 'replace').decode('latin-1')
-
-    pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 8, "VECTOR CHECK AERIAL GROUP INC.", border=0, new_x="LMARGIN", new_y="NEXT", align="C")
-    pdf.set_font("helvetica", "I", 10)
-    pdf.cell(0, 6, "Atmospheric Risk Assessment (Operational Flight Briefing)", border=0, new_x="LMARGIN", new_y="NEXT", align="C")
-    pdf.ln(5)
-
-    pdf.set_font("helvetica", "B", 10)
-    pdf.cell(40, 6, "Target Coordinates:", border=0)
-    pdf.set_font("helvetica", "", 10)
-    pdf.cell(0, 6, safe_txt(f"{lat}, {lon}"), border=0, new_x="LMARGIN", new_y="NEXT")
-
-    pdf.set_font("helvetica", "B", 10)
-    pdf.cell(40, 6, "Regional Area:", border=0)
-    pdf.set_font("helvetica", "", 10)
-    pdf.cell(0, 6, safe_txt(regional_name), border=0, new_x="LMARGIN", new_y="NEXT")
-
-    pdf.set_font("helvetica", "B", 10)
-    pdf.cell(40, 6, "Reference Station:", border=0)
-    pdf.set_font("helvetica", "", 10)
-    pdf.cell(0, 6, safe_txt(stn_display_str), border=0, new_x="LMARGIN", new_y="NEXT")
-
-    pdf.set_font("helvetica", "B", 10)
-    pdf.cell(40, 6, "Model / Valid Time:", border=0)
-    pdf.set_font("helvetica", "", 10)
-    pdf.cell(0, 6, safe_txt(f"{model_choice} | {selected_time_str}"), border=0, new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(5)
-
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(0, 8, "FORECASTED SURFACE CONDITIONS", border=0, new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("helvetica", "", 10)
-    pdf.multi_cell(0, 6, safe_txt(
-        f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\n"
-        f"Wind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\n"
-        f"Weather: {weather_str} | Visibility: {vis_disp}\n"
-        f"Cloud Base: {c_base_disp} | Freezing Level: {frz_disp}"
-    ))
-    pdf.ln(5)
-
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(0, 8, "ASTRONOMICAL & SPACE WEATHER", border=0, new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("helvetica", "", 10)
-    pdf.multi_cell(0, 6, safe_txt(
-        f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
-        f"Moon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n"
-        f"Space Weather: Kp Index {space_data['kp']} | GNSS Risk: {space_data['risk']}"
-    ))
-    pdf.ln(5)
-
-    if icao != "NONE":
-        pdf.set_font("helvetica", "B", 12)
-        pdf.cell(0, 8, f"STATION ACTUALS ({icao})", border=0, new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("helvetica", "B", 10)
-        pdf.cell(0, 6, "METAR:", border=0, new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("helvetica", "", 9)
-        pdf.multi_cell(0, 5, safe_txt(clean_metar))
-        pdf.ln(2)
-        pdf.set_font("helvetica", "B", 10)
-        pdf.cell(0, 6, "TAF:", border=0, new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("helvetica", "", 9)
-        pdf.multi_cell(0, 5, safe_txt(clean_taf))
-        pdf.ln(5)
-
-    def draw_table(title: str, df: pd.DataFrame) -> None:
-        pdf.set_font("helvetica", "B", 12)
-        pdf.cell(0, 8, title, border=0, new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("helvetica", "B", 9)
-        col_names  = ["Alt (AGL)"] + list(df.columns)
-        col_widths = [25, 20, 25, 25, 30, 25]
-        for col_i, col in enumerate(col_names):
-            pdf.cell(col_widths[col_i], 8, safe_txt(str(col)), border=1, align='C')
-        pdf.ln(8)
-        pdf.set_font("helvetica", "", 9)
-        for row_label, row in df.iterrows():
-            pdf.cell(col_widths[0], 8, safe_txt(str(row_label)), border=1, align='C')
-            for val_i, val in enumerate(row):
-                pdf.cell(col_widths[val_i + 1], 8, safe_txt(str(val)), border=1, align='C')
-            pdf.ln(8)
-        pdf.ln(5)
-
-    draw_table("TACTICAL HAZARD STACK (0-400ft AGL)",      df_tactical)
-    draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)",  df_ext)
-
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(0, 8, "THERMODYNAMIC & AERODYNAMIC PROFILE", border=0, new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("helvetica", "", 10)
-    pdf.multi_cell(0, 6, safe_txt(
-        f"Precipitation Risk: {pop}% ({precip} mm)\n"
-        f"Density Altitude (DA): {density_alt:,} ft | PBL Height: {pbl_disp}\n"
-        f"Convective Available Potential Energy (CAPE): {cape} J/kg"
-    ))
-    pdf.ln(5)
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp_name = tmp.name
-
-    try:
-        pdf.output(tmp_name)
-        with open(tmp_name, "rb") as f:
-            return f.read()
-    finally:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
-
-
-# Cache the PDF in session_state — only rebuild when the briefing state changes
-_pdf_cache_key = f"{lat}_{lon}_{forecast_idx}_{model_choice}_{icao}"
-if st.session_state.get("_pdf_cache_key") != _pdf_cache_key:
-    st.session_state["_pdf_bytes"]     = generate_pdf_report()
-    st.session_state["_pdf_cache_key"] = _pdf_cache_key
-
-
-def log_download_callback() -> None:
-    try: log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "DOWNLOAD_PDF")
-    except Exception: pass
-
-
-st.download_button(
-    label     = "Download Flight Briefing (PDF)",
-    data      = st.session_state["_pdf_bytes"],
-    file_name = f"VCAG_Briefing_{lat}_{lon}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-    mime      = "application/pdf",
-    on_click  = log_download_callback,
-)
-
-st.divider()
 
 st.subheader("Vertical Atmospheric Profile (Convective Ops)")
 fig_skewt = plot_convective_profile(h, forecast_idx, t_temp, td, w_spd, sfc_dir, sfc_elevation)
