@@ -1682,7 +1682,7 @@ else:
     # Build synthetic density altitude distribution from cached temp + pressure anchors
     _da_dist = _build_da_distribution(climate, sfc_elevation)
 
-    # Color helper: monochrome by default, accent only for elevated/anomalous
+    # Color helper: muted gray for normal, amber for elevated, red for anomalous
     def _accent(p):
         if p >= 90 or p <= 10:
             return "#ff6b4a"   # red — anomalous
@@ -1700,13 +1700,13 @@ else:
         def _card(label, value_html, avg_html, pct):
             chip_color = _accent(pct)
             return (
-                f'<div style="background:#161A1F;border:1px solid #23272F;padding:10px 12px;border-radius:6px;">'
-                f'<div style="font-size:0.65rem;color:#5C6370;text-transform:uppercase;letter-spacing:0.5px;">{label}</div>'
-                f'<div style="display:flex;align-items:baseline;justify-content:space-between;gap:6px;margin-top:4px;">'
-                f'<span style="font-size:1.25rem;font-weight:500;color:#E5E7EB;">{value_html}</span>'
-                f'<span style="font-size:0.6rem;color:{chip_color};font-weight:500;">P{pct}</span>'
+                f'<div style="background:#161A1F;border:1px solid #2A2F38;padding:11px 13px;border-radius:6px;">'
+                f'<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.6px;font-weight:500;">{label}</div>'
+                f'<div style="display:flex;align-items:baseline;justify-content:space-between;gap:6px;margin-top:5px;">'
+                f'<span style="font-size:1.3rem;font-weight:600;color:#E58E26;font-variant-numeric:tabular-nums;">{value_html}</span>'
+                f'<span style="font-size:0.65rem;color:{chip_color};font-weight:600;">P{pct}</span>'
                 f'</div>'
-                f'<div style="font-size:0.65rem;color:#5C6370;margin-top:2px;">avg {avg_html}</div>'
+                f'<div style="font-size:0.65rem;color:#6B7280;margin-top:3px;">avg <span style="color:#9CA3AF;font-variant-numeric:tabular-nums;">{avg_html}</span></div>'
                 f'</div>'
             )
 
@@ -1730,10 +1730,10 @@ else:
                            f'{_da_dist["p50"]:,} ft', _da_pct),
                      unsafe_allow_html=True)
 
-        # --- Percentile Bars: monochrome track, single accent marker ---
-        st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+        # --- Percentile Bars: visible track, bolder marker ---
+        st.markdown("<div style='margin-top:18px;'></div>", unsafe_allow_html=True)
         st.markdown(
-            "<div style='font-size:0.7rem;color:#5C6370;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:8px;'>"
+            "<div style='font-size:0.7rem;color:#9CA3AF;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:10px;font-weight:500;'>"
             "Position vs 25-Year Normals</div>",
             unsafe_allow_html=True,
         )
@@ -1750,38 +1750,43 @@ else:
 
         for _bar_label, _bar_pct in _bar_data:
             _marker_clr = _accent(_bar_pct)
-            _pct_clr = _marker_clr if _marker_clr != "#A0A4AB" else "#8E949E"
+            # When normal, use a brighter neutral so the marker is still visible
+            if _marker_clr == "#A0A4AB":
+                _marker_clr = "#CBD5E1"
+            _pct_clr = _accent(_bar_pct)
+            if _pct_clr == "#A0A4AB":
+                _pct_clr = "#9CA3AF"
             _bar_html = (
-                f'<div style="display:flex;align-items:center;gap:10px;margin:5px 0;">'
-                f'<span style="font-size:0.7rem;color:#8E949E;min-width:50px;text-align:right;">{_bar_label}</span>'
-                f'<div style="flex:1;height:6px;background:#1F242C;border-radius:3px;position:relative;">'
-                # subtle median tick
-                f'<div style="position:absolute;left:50%;top:-2px;width:1px;height:10px;background:#2A2F38;"></div>'
-                # forecast marker (vertical line, accent only when anomalous)
-                f'<div style="position:absolute;left:{_bar_pct}%;top:-3px;width:2px;height:12px;background:{_marker_clr};border-radius:1px;transform:translateX(-50%);"></div>'
+                f'<div style="display:flex;align-items:center;gap:10px;margin:6px 0;">'
+                f'<span style="font-size:0.72rem;color:#9CA3AF;min-width:54px;text-align:right;">{_bar_label}</span>'
+                f'<div style="flex:1;height:8px;background:#2A2F38;border-radius:4px;position:relative;">'
+                # median tick — slightly brighter so it reads
+                f'<div style="position:absolute;left:50%;top:-3px;width:1px;height:14px;background:#3F4651;"></div>'
+                # forecast marker — 3px wide, capped, full color
+                f'<div style="position:absolute;left:{_bar_pct}%;top:-3px;width:3px;height:14px;background:{_marker_clr};border-radius:1.5px;transform:translateX(-50%);box-shadow:0 0 4px rgba(0,0,0,0.4);"></div>'
                 f'</div>'
-                f'<span style="font-size:0.7rem;color:{_pct_clr};min-width:32px;font-variant-numeric:tabular-nums;">P{_bar_pct}</span>'
+                f'<span style="font-size:0.72rem;color:{_pct_clr};min-width:34px;font-variant-numeric:tabular-nums;font-weight:500;">P{_bar_pct}</span>'
                 f'</div>'
             )
             st.markdown(_bar_html, unsafe_allow_html=True)
 
         st.markdown(
-            '<div style="display:flex;gap:14px;margin-top:10px;font-size:0.6rem;color:#5C6370;letter-spacing:0.3px;">'
+            '<div style="display:flex;gap:14px;margin-top:12px;font-size:0.62rem;color:#6B7280;letter-spacing:0.3px;">'
             '<span>P25\u2013P75 normal</span>'
-            '<span>P10\u2013P25 / P75\u2013P90 elevated</span>'
-            '<span>&lt;P10 / &gt;P90 anomalous</span>'
+            '<span style="color:#E58E26;">\u00b7 elevated</span>'
+            '<span style="color:#ff6b4a;">\u00b7 anomalous</span>'
             '</div>',
             unsafe_allow_html=True,
         )
 
     with clim_right:
         st.markdown(
-            f"<div style='font-size:0.7rem;color:#5C6370;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:2px;'>"
+            f"<div style='font-size:0.7rem;color:#9CA3AF;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:2px;font-weight:500;'>"
             f"Wind Direction \u2014 {_month_name}</div>",
             unsafe_allow_html=True,
         )
         st.markdown(
-            "<div style='font-size:0.65rem;color:#5C6370;margin-bottom:8px;'>Frequency over 25 years</div>",
+            "<div style='font-size:0.65rem;color:#6B7280;margin-bottom:10px;'>Frequency over 25 years</div>",
             unsafe_allow_html=True,
         )
 
@@ -1793,69 +1798,69 @@ else:
         for _wr in climate["wind_rose"]:
             _is_current = (_wr["dir"] == _cur_dir_name) and w_spd > 0
 
+            _strong_w = _wr["strong"] * _bar_scale
+            _mod_strong_w = (_wr["mod"] + _wr["strong"]) * _bar_scale
             _total_w = _wr["total"] * _bar_scale
-            _calm_w  = _wr["calm"] * _bar_scale
-            _mod_w   = (_wr["calm"] + _wr["mod"]) * _bar_scale
 
-            # Three shades of one color = clean speed segmentation without rainbow
-            # darker = calmer, lighter = stronger
-            _label_clr = "#E5E7EB" if _is_current else "#8E949E"
-            _label_weight = "600" if _is_current else "400"
-            _row_border = "background:#1A1E25;" if _is_current else ""
+            # Three distinct shades — calm gray, mid steel-blue, strong amber
+            # Strong-wind segment (20+kt) gets the accent because it's operationally relevant
+            _label_clr = "#F1F5F9" if _is_current else "#9CA3AF"
+            _label_weight = "600" if _is_current else "500"
+            _row_bg = "background:#1C2128;" if _is_current else ""
 
             _row_html = (
-                f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:2px 4px;border-radius:3px;{_row_border}">'
-                f'<span style="font-size:0.7rem;font-weight:{_label_weight};color:{_label_clr};width:22px;text-align:right;font-variant-numeric:tabular-nums;">{_wr["dir"]}</span>'
-                f'<div style="flex:1;height:8px;background:#1F242C;border-radius:2px;position:relative;overflow:hidden;">'
-                # Total bar (mid gray base)
-                f'<div style="position:absolute;left:0;top:0;width:{_total_w}%;height:100%;background:#475569;border-radius:2px;"></div>'
-                # Moderate-and-up overlay (slightly lighter)
-                f'<div style="position:absolute;left:0;top:0;width:{(_wr["mod"] + _wr["strong"]) * _bar_scale}%;height:100%;background:#64748b;"></div>'
-                # Strong overlay (lightest, marks 20+ kt as the "noteworthy" bin)
-                f'<div style="position:absolute;left:0;top:0;width:{_wr["strong"] * _bar_scale}%;height:100%;background:#94a3b8;"></div>'
+                f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:3px 5px;border-radius:3px;{_row_bg}">'
+                f'<span style="font-size:0.72rem;font-weight:{_label_weight};color:{_label_clr};width:24px;text-align:right;font-variant-numeric:tabular-nums;">{_wr["dir"]}</span>'
+                f'<div style="flex:1;height:10px;background:#2A2F38;border-radius:2px;position:relative;overflow:hidden;">'
+                # Total bar — calm winds, neutral gray-blue
+                f'<div style="position:absolute;left:0;top:0;width:{_total_w}%;height:100%;background:#5B6573;"></div>'
+                # Mod+Strong overlay — lighter gray
+                f'<div style="position:absolute;left:0;top:0;width:{_mod_strong_w}%;height:100%;background:#94A3B8;"></div>'
+                # Strong overlay — amber to flag operationally relevant winds
+                f'<div style="position:absolute;left:0;top:0;width:{_strong_w}%;height:100%;background:#E58E26;"></div>'
                 f'</div>'
-                f'<span style="font-size:0.65rem;color:#8E949E;min-width:26px;text-align:right;font-variant-numeric:tabular-nums;">{_wr["total"]:.0f}%</span>'
+                f'<span style="font-size:0.68rem;color:#9CA3AF;min-width:28px;text-align:right;font-variant-numeric:tabular-nums;">{_wr["total"]:.0f}%</span>'
                 f'</div>'
             )
             st.markdown(_row_html, unsafe_allow_html=True)
 
         # Three-shade legend
         st.markdown(
-            '<div style="display:flex;gap:12px;margin-top:8px;font-size:0.6rem;color:#5C6370;align-items:center;">'
-            '<span style="display:inline-flex;align-items:center;gap:4px;">'
-            '<span style="width:10px;height:6px;background:#475569;border-radius:1px;"></span>0\u201310 kt</span>'
-            '<span style="display:inline-flex;align-items:center;gap:4px;">'
-            '<span style="width:10px;height:6px;background:#64748b;border-radius:1px;"></span>10\u201320 kt</span>'
-            '<span style="display:inline-flex;align-items:center;gap:4px;">'
-            '<span style="width:10px;height:6px;background:#94a3b8;border-radius:1px;"></span>20+ kt</span>'
+            '<div style="display:flex;gap:14px;margin-top:10px;font-size:0.62rem;color:#9CA3AF;align-items:center;">'
+            '<span style="display:inline-flex;align-items:center;gap:5px;">'
+            '<span style="width:12px;height:7px;background:#5B6573;border-radius:1px;"></span>0\u201310 kt</span>'
+            '<span style="display:inline-flex;align-items:center;gap:5px;">'
+            '<span style="width:12px;height:7px;background:#94A3B8;border-radius:1px;"></span>10\u201320 kt</span>'
+            '<span style="display:inline-flex;align-items:center;gap:5px;">'
+            '<span style="width:12px;height:7px;background:#E58E26;border-radius:1px;"></span>20+ kt</span>'
             '</div>',
             unsafe_allow_html=True,
         )
 
-        # --- Bottom stat row: prevailing, avg, delta + current ---
+        # --- Bottom stat row: prevailing, avg, now ---
         _delta = int(w_spd - climate["wind"]["p50"])
         _delta_str = f"+{_delta}" if _delta >= 0 else str(_delta)
-        _delta_clr = "#ff6b4a" if abs(_delta) >= 8 else "#E58E26" if abs(_delta) >= 4 else "#A0A4AB"
+        _delta_clr = "#ff6b4a" if abs(_delta) >= 8 else "#E58E26" if abs(_delta) >= 4 else "#9CA3AF"
 
         _stats_html = (
-            '<div style="display:flex;gap:1px;margin-top:14px;background:#23272F;border-radius:6px;overflow:hidden;">'
+            '<div style="display:flex;gap:1px;margin-top:14px;background:#2A2F38;border-radius:6px;overflow:hidden;border:1px solid #2A2F38;">'
 
-            '<div style="flex:1;background:#161A1F;padding:8px 10px;text-align:center;">'
-            '<div style="font-size:0.55rem;color:#5C6370;text-transform:uppercase;letter-spacing:0.5px;">Prevailing</div>'
-            f'<div style="font-size:0.85rem;font-weight:500;color:#E5E7EB;margin-top:3px;font-variant-numeric:tabular-nums;">{climate["prevailing_dir"]}</div>'
-            f'<div style="font-size:0.55rem;color:#5C6370;margin-top:1px;">{climate["prevailing_pct"]:.0f}% of hours</div>'
+            '<div style="flex:1;background:#161A1F;padding:9px 10px;text-align:center;">'
+            '<div style="font-size:0.58rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.6px;font-weight:500;">Prevailing</div>'
+            f'<div style="font-size:0.9rem;font-weight:600;color:#F1F5F9;margin-top:4px;font-variant-numeric:tabular-nums;">{climate["prevailing_dir"]}</div>'
+            f'<div style="font-size:0.58rem;color:#6B7280;margin-top:2px;">{climate["prevailing_pct"]:.0f}% of hours</div>'
             '</div>'
 
-            '<div style="flex:1;background:#161A1F;padding:8px 10px;text-align:center;">'
-            '<div style="font-size:0.55rem;color:#5C6370;text-transform:uppercase;letter-spacing:0.5px;">25-yr Avg</div>'
-            f'<div style="font-size:0.85rem;font-weight:500;color:#E5E7EB;margin-top:3px;font-variant-numeric:tabular-nums;">{climate["wind"]["p50"]:.0f} kt</div>'
-            f'<div style="font-size:0.55rem;color:#5C6370;margin-top:1px;">{_month_name}</div>'
+            '<div style="flex:1;background:#161A1F;padding:9px 10px;text-align:center;">'
+            '<div style="font-size:0.58rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.6px;font-weight:500;">25-yr Avg</div>'
+            f'<div style="font-size:0.9rem;font-weight:600;color:#F1F5F9;margin-top:4px;font-variant-numeric:tabular-nums;">{climate["wind"]["p50"]:.0f} kt</div>'
+            f'<div style="font-size:0.58rem;color:#6B7280;margin-top:2px;">{_month_name}</div>'
             '</div>'
 
-            '<div style="flex:1;background:#161A1F;padding:8px 10px;text-align:center;">'
-            '<div style="font-size:0.55rem;color:#5C6370;text-transform:uppercase;letter-spacing:0.5px;">Now</div>'
-            f'<div style="font-size:0.85rem;font-weight:500;color:#E5E7EB;margin-top:3px;font-variant-numeric:tabular-nums;">{int(sfc_dir)}\u00b0 / {int(w_spd)} kt</div>'
-            f'<div style="font-size:0.55rem;color:{_delta_clr};margin-top:1px;font-variant-numeric:tabular-nums;">{_delta_str} kt vs normal</div>'
+            '<div style="flex:1;background:#161A1F;padding:9px 10px;text-align:center;">'
+            '<div style="font-size:0.58rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.6px;font-weight:500;">Now</div>'
+            f'<div style="font-size:0.9rem;font-weight:600;color:#E58E26;margin-top:4px;font-variant-numeric:tabular-nums;">{int(sfc_dir)}\u00b0 / {int(w_spd)} kt</div>'
+            f'<div style="font-size:0.58rem;color:{_delta_clr};margin-top:2px;font-variant-numeric:tabular-nums;font-weight:500;">{_delta_str} kt vs normal</div>'
             '</div>'
 
             '</div>'
