@@ -243,18 +243,38 @@ def _fetch_eccc_year(station_id: str, year: int):
             continue
         out["timestamps"].append(ts)
 
+        # Temperature (°C) — field name unchanged across schema versions
         t = p.get("TEMP")
         out["temp_c"].append(float(t) if t is not None else None)
 
-        rh = p.get("REL_HUM")
+        # Relative humidity (%) — ECCC OGC API uses RELATIVE_HUMIDITY
+        # Fall back to legacy REL_HUM if the schema is older
+        rh = p.get("RELATIVE_HUMIDITY")
+        if rh is None:
+            rh = p.get("REL_HUM")
         out["rh"].append(float(rh) if rh is not None else None)
 
-        ws = p.get("WIND_SPD")
+        # Wind speed (km/h → kt) — ECCC OGC API uses WIND_SPEED
+        ws = p.get("WIND_SPEED")
+        if ws is None:
+            ws = p.get("WIND_SPD")
         out["wind_kt"].append(float(ws) * KMH_TO_KT if ws is not None else None)
 
-        wd = p.get("WIND_DIR")
-        out["wind_dir"].append(float(wd) * 10.0 if wd is not None else None)
+        # Wind direction — ECCC OGC API uses WIND_DIRECTION
+        # Encoding auto-detect: legacy uses tens-of-degrees (0-36),
+        # newer schemas use full degrees (0-360)
+        wd = p.get("WIND_DIRECTION")
+        if wd is None:
+            wd = p.get("WIND_DIR")
+        if wd is not None:
+            wd_val = float(wd)
+            if wd_val <= 36:
+                wd_val = wd_val * 10.0
+            out["wind_dir"].append(wd_val)
+        else:
+            out["wind_dir"].append(None)
 
+        # Station pressure (kPa → hPa)
         sp = p.get("STATION_PRESSURE")
         out["pressure_hpa"].append(float(sp) * KPA_TO_HPA if sp is not None else None)
 
