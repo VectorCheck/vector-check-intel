@@ -533,34 +533,52 @@ def _load_from_cache(sb_client, lat_bin, lon_bin, month):
 
 
 def _save_to_cache(sb_client, ctx: ClimateContext) -> None:
+    """Persists computed climate context to Supabase with source tagging.
+
+    Uses upsert with explicit on_conflict targets so that re-running the
+    bootstrap (or refreshing a cached site) updates existing rows in place
+    instead of failing on the unique constraint.
+    """
     try:
         now_iso = datetime.now(timezone.utc).isoformat()
 
         for var_name, vp in [("wind", ctx.wind), ("temp", ctx.temp),
                              ("pressure", ctx.pressure), ("rh", ctx.rh)]:
-            sb_client.table(PERCENTILE_TABLE).upsert({
-                "lat_bin": ctx.lat_bin, "lon_bin": ctx.lon_bin,
-                "month": ctx.month, "variable": var_name,
-                "p10": vp.p10, "p25": vp.p25, "p50": vp.p50,
-                "p75": vp.p75, "p90": vp.p90, "p99": vp.p99,
-                "mean_val": vp.mean, "sample_count": vp.sample_count,
-                "source": ctx.source, "source_label": ctx.source_label,
-                "source_distance_km": ctx.source_distance_km,
-                "updated_at": now_iso,
-            }).execute()
+            try:
+                sb_client.table(PERCENTILE_TABLE).upsert(
+                    {
+                        "lat_bin": ctx.lat_bin, "lon_bin": ctx.lon_bin,
+                        "month": ctx.month, "variable": var_name,
+                        "p10": vp.p10, "p25": vp.p25, "p50": vp.p50,
+                        "p75": vp.p75, "p90": vp.p90, "p99": vp.p99,
+                        "mean_val": vp.mean, "sample_count": vp.sample_count,
+                        "source": ctx.source, "source_label": ctx.source_label,
+                        "source_distance_km": ctx.source_distance_km,
+                        "updated_at": now_iso,
+                    },
+                    on_conflict="lat_bin,lon_bin,month,variable",
+                ).execute()
+            except Exception as e:
+                logger.warning("Percentile upsert failed for %s: %s", var_name, e)
 
         for wr in ctx.wind_rose:
-            sb_client.table(WIND_ROSE_TABLE).upsert({
-                "lat_bin": ctx.lat_bin, "lon_bin": ctx.lon_bin,
-                "month": ctx.month, "direction": wr.direction,
-                "total_pct": wr.total_pct,
-                "calm_pct": wr.calm_pct,
-                "moderate_pct": wr.moderate_pct,
-                "strong_pct": wr.strong_pct,
-                "avg_speed_kt": wr.avg_speed_kt,
-                "source": ctx.source, "source_label": ctx.source_label,
-                "updated_at": now_iso,
-            }).execute()
+            try:
+                sb_client.table(WIND_ROSE_TABLE).upsert(
+                    {
+                        "lat_bin": ctx.lat_bin, "lon_bin": ctx.lon_bin,
+                        "month": ctx.month, "direction": wr.direction,
+                        "total_pct": wr.total_pct,
+                        "calm_pct": wr.calm_pct,
+                        "moderate_pct": wr.moderate_pct,
+                        "strong_pct": wr.strong_pct,
+                        "avg_speed_kt": wr.avg_speed_kt,
+                        "source": ctx.source, "source_label": ctx.source_label,
+                        "updated_at": now_iso,
+                    },
+                    on_conflict="lat_bin,lon_bin,month,direction",
+                ).execute()
+            except Exception as e:
+                logger.warning("Wind rose upsert failed for %s: %s", wr.direction, e)
     except Exception as e:
         logger.warning("Climate cache write failed: %s", e)
 
