@@ -14,7 +14,7 @@ from fpdf import FPDF
 from supabase import create_client, Client
 
 # Import Vector Check Modules
-from modules.data_ingest    import get_aviation_weather, fetch_mission_data
+from modules.data_ingest    import get_aviation_weather, fetch_mission_data, get_model_run_info
 from modules.hazard_logic   import get_weather_element, calculate_icing_profile, get_turb_ice, apply_tactical_highlights
 from modules.visualizations import plot_convective_profile
 from modules.telemetry      import log_action
@@ -594,7 +594,7 @@ def compute_impact_matrix(
     tz_str:       str,
 ) -> tuple[list, list, list]:
     """
-    Evaluates Go/No-Go status for every hour in the 48-hour forecast window.
+    Evaluates Go/No-Go status for every hour in the 72-hour forecast window.
 
     Returns:
         x_labels    — bar chart x-axis labels (e.g. "T12", "T13" …)
@@ -895,7 +895,7 @@ for t_str in h["time"]:
 now_utc      = datetime.now(timezone.utc)
 time_diffs   = [abs((datetime.fromisoformat(t).replace(tzinfo=timezone.utc) - now_utc).total_seconds()) for t in h["time"]]
 nearest_idx  = time_diffs.index(min(time_diffs))
-max_idx      = min(len(h["time"]) - 1, nearest_idx + 48)
+max_idx      = min(len(h["time"]) - 1, nearest_idx + 72)
 valid_times_display = times_display[nearest_idx : max_idx + 1]
 
 if "forecast_slider" not in st.session_state or st.session_state.forecast_slider not in valid_times_display:
@@ -905,7 +905,28 @@ if "forecast_slider" not in st.session_state or st.session_state.forecast_slider
 # =============================================================================
 # IMPACT MATRIX UI
 # =============================================================================
-st.subheader("Impact Matrix")
+
+# Fetch the run cycle info for the active model (cached separately from forecast data).
+# This tells us which NWP cycle (00Z/06Z/12Z/18Z for GEM/ECMWF, hourly for HRRR, etc.)
+# produced the forecast currently being displayed.
+@st.cache_data(ttl=1800)
+def _fetch_run_info_cached(mdl_url: str) -> dict:
+    return get_model_run_info(mdl_url)
+
+_run_info = _fetch_run_info_cached(model_api_map[model_choice])
+
+# Build model title with run cycle indicator
+if _run_info and _run_info.get("run_cycle_z"):
+    _run_age = _run_info.get("age_hours", 0)
+    _run_age_str = f"{_run_age}h ago" if _run_age < 24 else f"{_run_age // 24}d {_run_age % 24}h ago"
+    _matrix_title = f"Impact Matrix \u2014 {model_choice.split(' ')[0]} {_run_info['run_cycle_z']} run"
+    _matrix_sub = f"Initialized {_run_info['run_date']} {_run_info['run_cycle_z']} \u00b7 {_run_age_str} \u00b7 72h tactical window"
+else:
+    _matrix_title = f"Impact Matrix \u2014 {model_choice.split(' ')[0]}"
+    _matrix_sub = "72h tactical window"
+
+st.subheader(_matrix_title)
+st.caption(_matrix_sub)
 
 with st.expander("Configure Operational Constraints"):
     tc1, tc2, tc3, tc4, tc5 = st.columns(5)
@@ -950,10 +971,17 @@ x_labels, color_vals, hover_texts = compute_impact_matrix(
 
 tick_vals  = x_labels[::4]
 tick_texts = []
+_last_tick_date = None
 for val in tick_vals:
     tick_idx    = nearest_idx + x_labels.index(val)
     dt_local_tk = datetime.fromisoformat(h["time"][tick_idx]).replace(tzinfo=timezone.utc).astimezone(local_tz)
-    tick_texts.append(dt_local_tk.strftime('%H:%M'))
+    _this_date = dt_local_tk.strftime('%d %b')
+    # Show the date on the first tick of each day; hour-only on subsequent ticks within the same day
+    if _this_date != _last_tick_date:
+        tick_texts.append(f"{_this_date}<br>{dt_local_tk.strftime('%H:%M')}")
+        _last_tick_date = _this_date
+    else:
+        tick_texts.append(dt_local_tk.strftime('%H:%M'))
 
 fig_matrix = go.Figure(data=go.Bar(
     x=x_labels,
@@ -980,13 +1008,13 @@ fig_matrix.add_trace(go.Scatter(
 ))
 
 fig_matrix.update_layout(
-    height=65,
-    margin=dict(l=0, r=0, t=0, b=25),
+    height=85,
+    margin=dict(l=0, r=0, t=0, b=45),
     plot_bgcolor="#1B1E23",
     paper_bgcolor="#1B1E23",
     xaxis=dict(
         tickmode='array', tickvals=tick_vals, ticktext=tick_texts,
-        tickangle=0, tickfont=dict(color="#A0A4AB", size=11, family="Source Sans Pro, sans-serif"),
+        tickangle=0, tickfont=dict(color="#A0A4AB", size=10, family="Source Sans Pro, sans-serif"),
         showgrid=False, zeroline=False, fixedrange=True
     ),
     yaxis=dict(showticklabels=False, showgrid=False, zeroline=False, range=[-0.25, 1], fixedrange=True),
@@ -1523,7 +1551,8 @@ def generate_pdf_report() -> bytes:
     pdf.set_font("helvetica", "B", 10)
     pdf.cell(40, 6, "Model / Valid Time:", border=0)
     pdf.set_font("helvetica", "", 10)
-    pdf.cell(0, 6, safe_txt(f"{model_choice} | {selected_time_str}"), border=0, new_x="LMARGIN", new_y="NEXT")
+    _pdf_run_label = f" ({_run_info['run_cycle_z']} run)" if _run_info.get("run_cycle_z") else ""
+    pdf.cell(0, 6, safe_txt(f"{model_choice}{_pdf_run_label} | {selected_time_str}"), border=0, new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
 
     pdf.set_font("helvetica", "B", 12)
