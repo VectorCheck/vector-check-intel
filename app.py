@@ -21,6 +21,11 @@ from modules.telemetry      import log_action
 from modules.astronomy      import get_astronomical_data
 from modules.space_weather  import get_kp_index
 from modules.climate_ingest import get_climate_context
+from modules.kestrel_ingest import parse_kestrel_csv
+from modules.forecast_verification import (
+    average_session, compute_file_hash, match_forecast_hour,
+    compute_verification, store_verification, load_recent_verifications,
+)
 
 # FIX: calc_td and calculate_density_altitude now live exclusively in physics.py.
 # Importing from the single authoritative source eliminates the previous duplicate
@@ -1866,6 +1871,206 @@ else:
             '</div>'
         )
         st.markdown(_stats_html, unsafe_allow_html=True)
+
+st.divider()
+
+
+# =============================================================================
+# FORECAST VERIFICATION — Kestrel 5500 Ground Truth
+# =============================================================================
+
+st.subheader("Forecast Verification")
+
+_vf_left, _vf_right = st.columns([1, 2])
+
+with _vf_left:
+    st.markdown(
+        '<div style="font-size:0.7rem;color:#6B7280;margin-bottom:8px;">'
+        'Upload a Kestrel 5500 CSV to compare ground-truth measurements against the active NWP forecast.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    _kestrel_file = st.file_uploader(
+        "Kestrel 5500 CSV",
+        type=["csv"],
+        key="kestrel_upload",
+        label_visibility="collapsed",
+    )
+
+    # Magnetic declination for mag→true wind direction correction
+    # Belleville ON ~11°W, Cold Lake AB ~14°E, Petawawa ON ~13°W, Bagotville QC ~17°W, Toronto ON ~10°W
+    _mag_dec = st.number_input("Magnetic declination (°W negative)", value=-13.0, step=0.5,
+                                format="%.1f", help="Applied to Kestrel wind direction for true north correction")
+
+if _kestrel_file is not None:
+    try:
+        _file_bytes = _kestrel_file.getvalue()
+        _file_text = _file_bytes.decode("utf-8", errors="replace")
+        _file_hash = compute_file_hash(_file_bytes)
+
+        # Parse Kestrel CSV
+        _observations = parse_kestrel_csv(_file_text, magnetic_declination=_mag_dec)
+
+        if not _observations or len(_observations) < 3:
+            st.warning("Could not parse enough data points from the CSV. Check the file format.")
+        else:
+            # Average the session
+            _session = average_session(_observations, magnetic_declination=_mag_dec)
+            _session.file_hash = _file_hash
+
+            # Match against forecast
+            _match = match_forecast_hour(_session, h["time"], h)
+
+            if _match is None:
+                st.warning("No forecast hour within 90 minutes of the Kestrel session. Ensure the forecast is loaded for the same date.")
+            else:
+                # Determine model name from model_choice
+                _model_label = model_choice.split("/")[-1].replace("_", " ").upper() if model_choice else "NWP"
+
+                # Compute verification
+                _vr = compute_verification(
+                    session=_session,
+                    forecast=_match,
+                    elevation_ft=sfc_elevation,
+                    operator=st.session_state.get("active_operator", "UNKNOWN"),
+                    lat=lat, lon=lon,
+                    model_name=_model_label,
+                )
+
+                # Store in Supabase
+                _sb = _get_supabase()
+                if _sb:
+                    _stored = store_verification(_sb, _vr)
+                    if _stored:
+                        st.toast("Verification stored.", icon="\u2705")
+
+                # --- DISPLAY RESULT ---
+                with _vf_right:
+                    # MVS Score and grade
+                    _grade_colors = {"A": "#4ade80", "B": "#94a3b8", "C": "#E58E26", "F": "#ff6b4a"}
+                    _gc = _grade_colors.get(_vr.grade, "#94a3b8")
+
+                    st.markdown(
+                        f'<div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;">'
+                        f'<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;'
+                        f'width:64px;height:64px;border:2px solid {_gc};border-radius:8px;">'
+                        f'<div style="font-size:1.4rem;font-weight:700;color:{_gc};font-variant-numeric:tabular-nums;">{_vr.mvs}</div>'
+                        f'<div style="font-size:0.55rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;">MVS</div>'
+                        f'</div>'
+                        f'<div>'
+                        f'<div style="font-size:0.85rem;color:#E5E7EB;font-weight:500;">{_vr.assessment}</div>'
+                        f'<div style="font-size:0.65rem;color:#6B7280;margin-top:2px;">'
+                        f'{_session.sample_count} samples \u00b7 {_session.duration_seconds}s session \u00b7 '
+                        f'{_model_label} +{_vr.lead_time_hours}h</div>'
+                        f'</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # Delta table
+                    _vars = [
+                        ("Wind Speed",  f"{_vr.actual_wind_kt:.0f} kt",  f"{_vr.fcst_wind_kt:.0f} kt",  f"{_vr.delta_wind_kt:+.1f} kt"),
+                        ("Wind Dir",    f"{_vr.actual_wind_dir:.0f}\u00b0", f"{_vr.fcst_wind_dir:.0f}\u00b0", f"{_vr.delta_wind_dir:+.0f}\u00b0"),
+                        ("Temperature", f"{_vr.actual_temp_c:.1f}\u00b0C",  f"{_vr.fcst_temp_c:.1f}\u00b0C",  f"{_vr.delta_temp_c:+.1f}\u00b0C"),
+                        ("RH",          f"{_vr.actual_rh:.0f}%",          f"{_vr.fcst_rh:.0f}%",          f"{_vr.delta_rh:+.0f}%"),
+                        ("Pressure",    f"{_vr.actual_pressure_hpa:.0f} hPa", f"{_vr.fcst_pressure_hpa:.0f} hPa", f"{_vr.delta_pressure_hpa:+.1f} hPa"),
+                        ("Density Alt", f"{_vr.actual_density_alt_ft:,} ft", f"{_vr.fcst_density_alt_ft:,} ft", f"{_vr.delta_density_alt_ft:+,} ft"),
+                    ]
+
+                    _tbl_header = (
+                        '<div style="display:grid;grid-template-columns:100px 90px 90px 90px;gap:1px;margin-bottom:1px;">'
+                        '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;"></div>'
+                        '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;">Kestrel</div>'
+                        '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;">Forecast</div>'
+                        '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;">Delta</div>'
+                        '</div>'
+                    )
+                    st.markdown(_tbl_header, unsafe_allow_html=True)
+
+                    for _vname, _actual, _fcst, _delta_str in _vars:
+                        # Parse delta magnitude for coloring
+                        try:
+                            _dval = float(_delta_str.split()[0].replace(",", "").replace("\u00b0", ""))
+                        except (ValueError, IndexError):
+                            _dval = 0
+                        if _vname == "Wind Speed":
+                            _d_clr = "#ff6b4a" if abs(_dval) >= 5 else "#E58E26" if abs(_dval) >= 3 else "#9CA3AF"
+                        elif _vname == "Wind Dir":
+                            _d_clr = "#ff6b4a" if abs(_dval) >= 30 else "#E58E26" if abs(_dval) >= 15 else "#9CA3AF"
+                        elif _vname == "Temperature":
+                            _d_clr = "#ff6b4a" if abs(_dval) >= 3 else "#E58E26" if abs(_dval) >= 2 else "#9CA3AF"
+                        else:
+                            _d_clr = "#9CA3AF"
+
+                        _tbl_row = (
+                            f'<div style="display:grid;grid-template-columns:100px 90px 90px 90px;gap:1px;">'
+                            f'<div style="font-size:0.72rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;">{_vname}</div>'
+                            f'<div style="font-size:0.72rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">{_actual}</div>'
+                            f'<div style="font-size:0.72rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">{_fcst}</div>'
+                            f'<div style="font-size:0.72rem;color:{_d_clr};padding:3px 6px;background:#161A1F;font-weight:500;font-variant-numeric:tabular-nums;">{_delta_str}</div>'
+                            f'</div>'
+                        )
+                        st.markdown(_tbl_row, unsafe_allow_html=True)
+
+                    # Flags
+                    if _vr.flags:
+                        _flags_html = '<div style="margin-top:10px;">'
+                        for _flag in _vr.flags:
+                            _flags_html += (
+                                f'<div style="font-size:0.65rem;color:#E58E26;margin:2px 0;display:flex;align-items:center;gap:5px;">'
+                                f'<span style="font-size:0.5rem;">\u26a0</span> {_flag}</div>'
+                            )
+                        _flags_html += '</div>'
+                        st.markdown(_flags_html, unsafe_allow_html=True)
+
+    except UnicodeDecodeError:
+        st.error("File encoding error. The Kestrel CSV should be UTF-8 or ASCII.")
+    except Exception as e:
+        st.error(f"Verification failed: {e}")
+
+# --- Trailing MVS History (shows even without upload) ---
+_sb_vf = _get_supabase()
+if _sb_vf:
+    _recent = load_recent_verifications(_sb_vf, lat, lon, days=90)
+    if _recent:
+        st.markdown(
+            '<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
+            'margin-top:16px;margin-bottom:8px;">Recent Verifications</div>',
+            unsafe_allow_html=True,
+        )
+        _hist_rows = ""
+        for _rv in _recent[:10]:
+            _rv_gc = _grade_colors.get(_rv.get("grade", "B"), "#94a3b8") if '_grade_colors' in dir() else "#94a3b8"
+            _rv_ts = _rv.get("timestamp", "")[:16].replace("T", " ")
+            _rv_mvs = _rv.get("mvs", 0)
+            _rv_dw = _rv.get("delta_wind_kt", 0) or 0
+            _rv_dt = _rv.get("delta_temp_c", 0) or 0
+            _rv_model = _rv.get("model_name", "")
+            _rv_op = _rv.get("operator", "")
+
+            _gc_map = {"A": "#4ade80", "B": "#94a3b8", "C": "#E58E26", "F": "#ff6b4a"}
+            _rv_clr = _gc_map.get(_rv.get("grade", "B"), "#94a3b8")
+
+            _hist_rows += (
+                f'<div style="display:grid;grid-template-columns:130px 50px 80px 70px 70px;gap:1px;margin-bottom:1px;">'
+                f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;">{_rv_ts}</div>'
+                f'<div style="font-size:0.65rem;color:{_rv_clr};padding:3px 6px;background:#161A1F;font-weight:600;font-variant-numeric:tabular-nums;">{_rv_mvs}</div>'
+                f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;">{_rv_model}</div>'
+                f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">\u0394w {_rv_dw:+.0f}kt</div>'
+                f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">\u0394t {_rv_dt:+.1f}\u00b0</div>'
+                f'</div>'
+            )
+
+        _hist_header = (
+            '<div style="display:grid;grid-template-columns:130px 50px 80px 70px 70px;gap:1px;margin-bottom:1px;">'
+            '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Time</div>'
+            '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">MVS</div>'
+            '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Model</div>'
+            '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Wind</div>'
+            '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Temp</div>'
+            '</div>'
+        )
+        st.markdown(_hist_header + _hist_rows, unsafe_allow_html=True)
 
 st.divider()
 
