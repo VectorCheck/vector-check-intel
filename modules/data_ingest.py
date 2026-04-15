@@ -1,5 +1,63 @@
 import urllib.request
 import json
+from datetime import datetime, timezone
+
+
+def get_model_run_info(model_url: str) -> dict:
+    """Fetches the latest model run cycle timestamp from Open-Meteo metadata.
+
+    Each model exposes a meta.json at a predictable path under its static assets.
+    The response contains `last_run_initialisation_time` (Unix timestamp) which
+    identifies which cycle (00Z, 06Z, 12Z, 18Z, etc.) produced the current data.
+
+    Args:
+        model_url: the forecast endpoint (e.g. https://api.open-meteo.com/v1/gem)
+
+    Returns:
+        dict with keys: run_cycle_z (e.g. "12Z"), run_date (YYYY-MM-DD),
+        run_datetime_utc (datetime), age_hours (int), or empty dict on failure
+    """
+    # Map forecast endpoints to their metadata paths.
+    # These endpoints aggregate multiple underlying models; we probe the
+    # primary model for each endpoint to get a representative run cycle.
+    meta_map = {
+        "v1/gem":      "https://api.open-meteo.com/data/cmc_gem_hrdps_continental/static/meta.json",
+        "v1/forecast": "https://api.open-meteo.com/data/ecmwf_ifs025/static/meta.json",
+        "v1/gfs":      "https://api.open-meteo.com/data/ncep_gfs025/static/meta.json",
+        "v1/ecmwf":    "https://api.open-meteo.com/data/ecmwf_ifs025/static/meta.json",
+    }
+
+    meta_url = None
+    for key, url in meta_map.items():
+        if key in model_url:
+            meta_url = url
+            break
+
+    if meta_url is None:
+        return {}
+
+    try:
+        req = urllib.request.Request(meta_url, headers={'User-Agent': 'VectorCheck-App/2.1'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            meta = json.loads(response.read().decode('utf-8'))
+
+        ts = meta.get("last_run_initialisation_time")
+        if ts is None:
+            return {}
+
+        run_dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+        now = datetime.now(timezone.utc)
+        age_hours = int((now - run_dt).total_seconds() / 3600)
+
+        return {
+            "run_cycle_z": f"{run_dt.hour:02d}Z",
+            "run_date": run_dt.strftime('%Y-%m-%d'),
+            "run_datetime_utc": run_dt,
+            "age_hours": age_hours,
+        }
+    except Exception:
+        return {}
+
 
 def get_aviation_weather(icao):
     """Fetches real-time METAR and TAF for the specified ICAO code."""
