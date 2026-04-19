@@ -1929,7 +1929,7 @@ def _fetch_ensemble_cached(e_lat: float, e_lon: float) -> dict:
         "models_used": [m.name for m in models],
         "blocks": [
             {
-                "label": b.block_label, "start_hour": b.start_hour,
+                "block_label": b.block_label, "start_hour": b.start_hour,
                 "wind_mean": b.wind_mean, "wind_min": b.wind_min,
                 "wind_max": b.wind_max, "wind_spread": b.wind_spread,
                 "wind_dir_mean": b.wind_dir_mean, "wind_dir_spread": b.wind_dir_spread,
@@ -2015,7 +2015,7 @@ else:
 
         _blk_row = (
             f'<div style="display:grid;grid-template-columns:120px 80px 70px 60px 80px 60px 55px;gap:1px;">'
-            f'<div style="font-size:0.7rem;color:#D1D5DB;padding:3px 6px;background:#161A1F;">{_b["label"]}</div>'
+            f'<div style="font-size:0.7rem;color:#D1D5DB;padding:3px 6px;background:#161A1F;">{_b["block_label"]}</div>'
             f'<div style="font-size:0.7rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
             f'{_b["wind_min"]:.0f}-{_b["wind_max"]:.0f} kt</div>'
             f'<div style="font-size:0.7rem;color:{_w_spr_clr};padding:3px 6px;background:#161A1F;font-weight:500;font-variant-numeric:tabular-nums;">'
