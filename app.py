@@ -21,6 +21,10 @@ from modules.telemetry      import log_action
 from modules.astronomy      import get_astronomical_data
 from modules.space_weather  import get_kp_index
 from modules.climate_ingest import get_climate_context
+from modules.ensemble_analysis import (
+    fetch_all_models, compute_ensemble_blocks,
+    identify_risk_windows, generate_briefing,
+)
 from modules.kestrel_ingest import parse_kestrel_csv
 from modules.forecast_verification import (
     average_session, compute_file_hash, match_forecast_hour,
@@ -1660,7 +1664,7 @@ st.divider()
 # direction frequency bars. Cached in Supabase after first computation.
 # =============================================================================
 
-st.subheader("Climate Context")
+st.subheader("Climatology")
 
 _climate_month = datetime.fromisoformat(h["time"][forecast_idx]).month
 climate = fetch_climate_context_cached(lat, lon, _climate_month)
@@ -1905,10 +1909,189 @@ st.divider()
 
 
 # =============================================================================
-# FORECAST VERIFICATION — Kestrel 5500 Ground Truth
+# MODEL ANALYSIS — Multi-Model Ensemble Consensus
 # =============================================================================
 
-st.subheader("Forecast Verification")
+st.subheader("Model Analysis")
+
+@st.cache_data(ttl=3600, show_spinner="Fetching multi-model ensemble...")
+def _fetch_ensemble_cached(e_lat: float, e_lon: float) -> dict:
+    """Fetches 4 NWP models and computes ensemble analysis. Cached 1 hour."""
+    models = fetch_all_models(e_lat, e_lon)
+    if not models:
+        return {"error": "No models returned data."}
+
+    blocks = compute_ensemble_blocks(models)
+    risks = identify_risk_windows(blocks)
+
+    return {
+        "model_count": len(models),
+        "models_used": [m.name for m in models],
+        "blocks": [
+            {
+                "label": b.block_label, "start_hour": b.start_hour,
+                "wind_mean": b.wind_mean, "wind_min": b.wind_min,
+                "wind_max": b.wind_max, "wind_spread": b.wind_spread,
+                "wind_dir_mean": b.wind_dir_mean, "wind_dir_spread": b.wind_dir_spread,
+                "gust_mean": b.gust_mean, "gust_max": b.gust_max, "gust_spread": b.gust_spread,
+                "temp_mean": b.temp_mean, "temp_min": b.temp_min,
+                "temp_max": b.temp_max, "temp_spread": b.temp_spread,
+                "pressure_mean": b.pressure_mean, "pressure_spread": b.pressure_spread,
+                "precip_prob_max": b.precip_prob_max,
+                "confidence": b.confidence, "model_count": b.model_count,
+            }
+            for b in blocks
+        ],
+        "risks": [
+            {"label": r.start_label, "var": r.variable, "spread": r.spread,
+             "detail": r.detail, "severity": r.severity}
+            for r in risks
+        ],
+        "consensus": "",
+        "wind_summary": "",
+        "precip_summary": "",
+        "confidence_summary": "",
+        "anomaly_flags": [],
+        "overall_confidence": "HIGH",
+    }
+
+_ens = _fetch_ensemble_cached(lat, lon)
+
+if _ens.get("error"):
+    st.warning(f"Model analysis unavailable: {_ens['error']}")
+else:
+    # Generate the briefing text using climate context if available
+    from modules.ensemble_analysis import BlockStats, RiskWindow, ModelForecast, EnsembleBriefing
+    _ens_blocks = [BlockStats(**{k: v for k, v in b.items()}) for b in _ens["blocks"]]
+    _ens_risks = [RiskWindow(start_label=r["label"], variable=r["var"], spread=r["spread"],
+                              detail=r["detail"], severity=r["severity"]) for r in _ens["risks"]]
+    _ens_models = [ModelForecast(name=n, valid=True) for n in _ens["models_used"]]
+
+    _climate_for_ens = climate if not climate.get("error") else None
+    _ens_brief = generate_briefing(_ens_models, _ens_blocks, _ens_risks, _climate_for_ens)
+
+    # --- Header: model count + confidence badge ---
+    _conf_colors = {"HIGH": "#4ade80", "MODERATE": "#E58E26", "LOW": "#ff6b4a"}
+    _conf_clr = _conf_colors.get(_ens_brief.overall_confidence, "#9CA3AF")
+
+    st.markdown(
+        f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">'
+        f'<span style="font-size:0.7rem;color:#9CA3AF;">'
+        f'{_ens_brief.model_count}/4 models reporting: {", ".join(_ens_brief.models_used)}</span>'
+        f'<span style="font-size:0.65rem;color:{_conf_clr};font-weight:600;'
+        f'border:1px solid {_conf_clr};border-radius:3px;padding:2px 8px;">'
+        f'{_ens_brief.overall_confidence} CONFIDENCE</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # --- Consensus text ---
+    if _ens_brief.consensus_summary:
+        st.markdown(
+            f'<div style="font-size:0.75rem;color:#D1D5DB;line-height:1.5;margin-bottom:10px;">'
+            f'{_ens_brief.consensus_summary}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # --- 12-hour block table ---
+    _blk_header = (
+        '<div style="display:grid;grid-template-columns:120px 80px 70px 60px 80px 60px 55px;gap:1px;margin-bottom:1px;">'
+        '<div style="font-size:0.58rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.4px;">Block</div>'
+        '<div style="font-size:0.58rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Wind</div>'
+        '<div style="font-size:0.58rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Spread</div>'
+        '<div style="font-size:0.58rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Gust</div>'
+        '<div style="font-size:0.58rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Temp</div>'
+        '<div style="font-size:0.58rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Precip</div>'
+        '<div style="font-size:0.58rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Conf</div>'
+        '</div>'
+    )
+    st.markdown(_blk_header, unsafe_allow_html=True)
+
+    for _b in _ens["blocks"]:
+        _w_spr_clr = "#ff6b4a" if _b["wind_spread"] >= 10 else "#E58E26" if _b["wind_spread"] >= 6 else "#9CA3AF"
+        _conf_badge_clr = _conf_colors.get(_b["confidence"], "#9CA3AF")
+        _pp_str = f'{_b["precip_prob_max"]:.0f}%' if _b["precip_prob_max"] >= 10 else "\u2014"
+        _pp_clr = "#E58E26" if _b["precip_prob_max"] >= 50 else "#9CA3AF"
+
+        _blk_row = (
+            f'<div style="display:grid;grid-template-columns:120px 80px 70px 60px 80px 60px 55px;gap:1px;">'
+            f'<div style="font-size:0.7rem;color:#D1D5DB;padding:3px 6px;background:#161A1F;">{_b["label"]}</div>'
+            f'<div style="font-size:0.7rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
+            f'{_b["wind_min"]:.0f}-{_b["wind_max"]:.0f} kt</div>'
+            f'<div style="font-size:0.7rem;color:{_w_spr_clr};padding:3px 6px;background:#161A1F;font-weight:500;font-variant-numeric:tabular-nums;">'
+            f'\u00b1{_b["wind_spread"]:.0f} kt</div>'
+            f'<div style="font-size:0.7rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
+            f'{_b["gust_max"]:.0f} kt</div>'
+            f'<div style="font-size:0.7rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
+            f'{_b["temp_min"]:.0f}-{_b["temp_max"]:.0f}\u00b0C</div>'
+            f'<div style="font-size:0.7rem;color:{_pp_clr};padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">{_pp_str}</div>'
+            f'<div style="font-size:0.65rem;color:{_conf_badge_clr};padding:3px 6px;background:#161A1F;font-weight:600;">'
+            f'{_b["confidence"][:3]}</div>'
+            f'</div>'
+        )
+        st.markdown(_blk_row, unsafe_allow_html=True)
+
+    # --- Wind + Precip summaries ---
+    _summary_parts = []
+    if _ens_brief.wind_summary:
+        _summary_parts.append(_ens_brief.wind_summary)
+    if _ens_brief.precip_summary:
+        _summary_parts.append(_ens_brief.precip_summary)
+    if _summary_parts:
+        st.markdown(
+            f'<div style="font-size:0.7rem;color:#9CA3AF;line-height:1.5;margin-top:10px;">'
+            f'{"<br>".join(_summary_parts)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # --- Risk Windows ---
+    if _ens["risks"]:
+        st.markdown(
+            '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
+            'margin-top:14px;margin-bottom:6px;font-weight:500;">Risk Windows</div>',
+            unsafe_allow_html=True,
+        )
+        for _r in _ens["risks"]:
+            _r_icon = "\u26a0" if _r["severity"] == "ALERT" else "\u25cf"
+            _r_clr = "#ff6b4a" if _r["severity"] == "ALERT" else "#E58E26"
+            st.markdown(
+                f'<div style="font-size:0.7rem;color:{_r_clr};margin:3px 0;display:flex;align-items:center;gap:6px;">'
+                f'<span style="font-size:0.55rem;">{_r_icon}</span>'
+                f'<span style="font-weight:500;">{_r["label"]}</span>'
+                f'<span style="color:#9CA3AF;">{_r["detail"]}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    # --- Anomaly flags from climate context ---
+    if _ens_brief.anomaly_flags:
+        st.markdown(
+            '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
+            'margin-top:12px;margin-bottom:6px;font-weight:500;">Climate Anomalies</div>',
+            unsafe_allow_html=True,
+        )
+        for _af in _ens_brief.anomaly_flags[:5]:
+            st.markdown(
+                f'<div style="font-size:0.7rem;color:#E58E26;margin:2px 0;">\u25cf {_af}</div>',
+                unsafe_allow_html=True,
+            )
+
+    # --- Confidence footer ---
+    if _ens_brief.confidence_summary:
+        st.markdown(
+            f'<div style="font-size:0.65rem;color:#6B7280;margin-top:12px;line-height:1.5;">'
+            f'{_ens_brief.confidence_summary}</div>',
+            unsafe_allow_html=True,
+        )
+
+st.divider()
+
+
+# =============================================================================
+# DATA CAPTURE VERIFICATION — Kestrel 5500 Ground Truth
+# =============================================================================
+
+st.subheader("Data Capture Verification")
 
 _vf_left, _vf_right = st.columns([1, 2])
 
