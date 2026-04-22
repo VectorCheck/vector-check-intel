@@ -25,6 +25,7 @@ from modules.ensemble_analysis import (
     fetch_all_models, compute_ensemble_blocks,
     identify_risk_windows, generate_briefing,
 )
+from modules.geomag import get_magnetic_declination
 from modules.kestrel_ingest import parse_kestrel_csv
 from modules.forecast_verification import (
     average_session, compute_file_hash, match_forecast_hour,
@@ -220,10 +221,10 @@ def check_password() -> bool:
     eula_text = """
 <div style="color: #A0A4AB; font-size: 0.85rem; line-height: 1.5; margin-bottom: 20px; height: 250px; overflow-y: scroll; padding: 15px; border: 1px solid #3E444E; background-color: #15171A; border-radius: 5px;">
 <strong>1. UNAUTHORIZED FOR PRIMARY DECISION MAKING (NOT A CERTIFIED BRIEFING)</strong><br>
-This Atmospheric Risk Management System is an uncertified, supplemental situational awareness tool. It aggregates and visualizes raw numerical weather prediction (NWP) models. It is STRICTLY PROHIBITED to use this software as a primary or sole source of aeronautical weather information. It DOES NOT replace, nor is it an alternative to, official flight weather briefings provided by NAV CANADA, Environment and Climate Change Canada (ECCC), NOAA, or other designated civil aviation authorities.
+This Atmospheric Risk Management System is an uncertified, supplemental situational awareness tool. It aggregates and visualizes raw numerical weather prediction (NWP) models. It is STRICTLY PROHIBITED to use this software as a primary or sole source of aeronautical weather information. It DOES NOT replace, nor is it an alternative to, official flight weather briefings provided by the designated civil aviation authority in the operator's jurisdiction (including but not limited to NAV CANADA, Environment and Climate Change Canada (ECCC), the U.S. Federal Aviation Administration (FAA) and National Oceanic and Atmospheric Administration (NOAA), the UK Civil Aviation Authority (CAA), the Civil Aviation Safety Authority (CASA) of Australia, EUROCONTROL, or any other national or regional aviation authority with jurisdiction over the airspace in which operations are conducted).
 <br><br>
 <strong>2. ABSOLUTE PILOT IN COMMAND (PIC) RESPONSIBILITY</strong><br>
-In accordance with Transport Canada Civil Aviation (TCCA) regulations, the Pilot in Command (PIC) retains absolute, non-transferable authority and responsibility for the safe operation of the aircraft. Atmospheric models are inherently flawed, subject to latency, and cannot accurately predict micro-climates, sudden localized shear, or boundary layer anomalies. Vector Check Aerial Group Inc. does not clear, authorize, or endorse any flight operations.
+In accordance with the civil aviation regulations applicable to the operator's jurisdiction (e.g. Transport Canada Civil Aviation (TCCA), the U.S. Federal Aviation Regulations (FAR), UK CAA regulations, or equivalent), the Pilot in Command (PIC) retains absolute, non-transferable authority and responsibility for the safe operation of the aircraft. Atmospheric models are inherently flawed, subject to latency, and cannot accurately predict micro-climates, sudden localized shear, or boundary layer anomalies. Vector Check Aerial Group Inc. does not clear, authorize, or endorse any flight operations.
 <br><br>
 <strong>3. INTELLECTUAL PROPERTY & PROPRIETARY ALGORITHMS</strong><br>
 All meteorological algorithms, hazard matrices, logic engines (including but not limited to the Visible Moisture Gate, atmospheric interpolation, and Urban Venturi multipliers), source code, and visual interfaces contained within this software are the exclusive intellectual property and trade secrets of Vector Check Aerial Group Inc. This agreement grants you a limited, non-exclusive, revocable, non-transferable license to use the software solely for internal operational awareness.
@@ -840,7 +841,18 @@ if icao == "NONE":
     st.sidebar.markdown("<div style='font-size: 0.85rem; color: #8E949E; margin-bottom: 15px;'>No TAF-issuing station within 50km.</div>", unsafe_allow_html=True)
 
 terrain_env = st.sidebar.selectbox("Terrain Environment:", options=["Land", "Water", "Mountains", "Urban"])
-model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
+
+# HRDPS (GEM 2.5km) coverage: Canada + northern US strip
+# Approximate bounds: 40-75°N latitude, -145 to -50°W longitude
+_hrdps_in_range = (40.0 <= lat <= 75.0) and (-145.0 <= lon <= -50.0)
+
+if _hrdps_in_range:
+    _model_options = ["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"]
+else:
+    _model_options = ["ECMWF (Global 9km)"]
+    st.sidebar.caption("HRDPS unavailable — outside GEM coverage area")
+
+model_choice = st.sidebar.selectbox("Select Forecast Model:", options=_model_options)
 
 
 def log_refresh_callback():
@@ -2109,10 +2121,18 @@ with _vf_left:
         label_visibility="collapsed",
     )
 
-    # Magnetic declination for mag→true wind direction correction
-    # Belleville ON ~11°W, Cold Lake AB ~14°E, Petawawa ON ~13°W, Bagotville QC ~17°W, Toronto ON ~10°W
-    _mag_dec = st.number_input("Magnetic declination (°W negative)", value=-13.0, step=0.5,
-                                format="%.1f", help="Applied to Kestrel wind direction for true north correction")
+    # Magnetic declination — auto-computed from current coordinates using IGRF.
+    # Operators can manually override if they have a more precise local value.
+    _auto_dec = get_magnetic_declination(lat, lon)
+    _mag_dec = st.number_input(
+        "Magnetic declination (°, East positive)",
+        value=float(_auto_dec),
+        step=0.5,
+        format="%.1f",
+        help=(f"Auto-computed for {lat:.2f}, {lon:.2f} via IGRF model. "
+              f"Applied to Kestrel wind direction for true north correction. "
+              f"Override if you have a more precise local value."),
+    )
 
 if _kestrel_file is not None:
     try:
@@ -2307,7 +2327,7 @@ st.divider()
 st.markdown("""
 <div style="text-align: center; color: #8E949E; font-size: 0.85rem; padding: 20px;">
 <strong>⚠️ FOR SITUATIONAL AWARENESS ONLY</strong><br>
-This system translates raw meteorological model data for uncrewed systems. It does not replace official NAV CANADA or NOAA flight service briefings. The Pilot in Command (PIC) retains ultimate authority and responsibility for flight safety. Vector Check Aerial Group Inc. assumes no liability for operational decisions made using this tool. <br><br>
+This system translates raw meteorological model data for uncrewed systems. It does not replace official flight weather briefings from the designated civil aviation authority in the operator's jurisdiction. The Pilot in Command (PIC) retains ultimate authority and responsibility for flight safety. Vector Check Aerial Group Inc. assumes no liability for operational decisions made using this tool. <br><br>
 <em>Usage of this system, including geographic querying and PDF generation, is actively logged to a secure database for audit and security purposes.</em>
 </div>
 """, unsafe_allow_html=True)
