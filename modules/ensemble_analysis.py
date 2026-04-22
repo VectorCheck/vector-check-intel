@@ -35,6 +35,50 @@ MODEL_ENDPOINTS = {
     "ICON":  "https://api.open-meteo.com/v1/dwd-icon",
 }
 
+# Regional high-resolution model swap-ins when outside primary coverage.
+# These replace HRDPS in the ensemble when the query point is outside Canada.
+REGIONAL_MODELS = {
+    # Europe — DWD ICON-EU and Meteo-France ARPEGE-Europe are both accurate at regional scale
+    # (~7 km). We use ICON-EU because it's the most-cited skilful model for Europe.
+    "icon_eu":   "https://api.open-meteo.com/v1/dwd-icon",
+    # Pacific / Australia — BOM ACCESS-G at 12 km, global coverage with Australia focus
+    "access_g":  "https://api.open-meteo.com/v1/bom",
+    # Generic global best-match — Open-Meteo auto-selects the highest-resolution
+    # model available for the location. This is the universal fallback.
+    "best":      "https://api.open-meteo.com/v1/forecast",
+}
+
+
+def _is_hrdps_coverage(lat: float, lon: float) -> bool:
+    """HRDPS covers Canada + a thin US strip. Approx 40-75N, -145 to -50W."""
+    return (40.0 <= lat <= 75.0) and (-145.0 <= lon <= -50.0)
+
+
+def _is_europe_coverage(lat: float, lon: float) -> bool:
+    """ICON-EU covers roughly 29-71N, -23 to 45E."""
+    return (29.0 <= lat <= 71.0) and (-23.0 <= lon <= 45.0)
+
+
+def _is_oceania_coverage(lat: float, lon: float) -> bool:
+    """BOM ACCESS-G is strongest over Australia/Pacific."""
+    return (-50.0 <= lat <= 10.0) and (100.0 <= lon <= 180.0)
+
+
+def _select_regional_model(lat: float, lon: float) -> tuple:
+    """Picks the best regional high-res model for the location.
+
+    Returns (model_name, endpoint_url). If no regional model applies,
+    returns the Open-Meteo best-match endpoint which auto-selects.
+    """
+    if _is_hrdps_coverage(lat, lon):
+        return ("HRDPS", MODEL_ENDPOINTS["HRDPS"])
+    if _is_europe_coverage(lat, lon):
+        return ("ICON-EU", REGIONAL_MODELS["icon_eu"])
+    if _is_oceania_coverage(lat, lon):
+        return ("ACCESS-G", REGIONAL_MODELS["access_g"])
+    # Default: use Open-Meteo's Best Match endpoint
+    return ("Best Match", REGIONAL_MODELS["best"])
+
 _HOURLY_VARS = (
     "temperature_2m,relative_humidity_2m,wind_speed_10m,"
     "wind_direction_10m,wind_gusts_10m,surface_pressure,"
@@ -201,9 +245,25 @@ def _fetch_model(name: str, url: str, lat: float, lon: float) -> ModelForecast:
 
 
 def fetch_all_models(lat: float, lon: float) -> list:
-    """Fetches all 4 models. Returns list of valid ModelForecast objects."""
+    """Fetches all 4 models. Returns list of valid ModelForecast objects.
+
+    Uses a regional high-resolution model in place of HRDPS when the query
+    point is outside HRDPS coverage. GFS, ECMWF, and ICON are global and
+    always included.
+    """
+    # Pick the local high-res model for this region
+    regional_name, regional_url = _select_regional_model(lat, lon)
+
+    # Build the active endpoint list: regional model + three global models
+    active_endpoints = {
+        regional_name: regional_url,
+        "GFS":   MODEL_ENDPOINTS["GFS"],
+        "ECMWF": MODEL_ENDPOINTS["ECMWF"],
+        "ICON":  MODEL_ENDPOINTS["ICON"],
+    }
+
     results = []
-    for name, url in MODEL_ENDPOINTS.items():
+    for name, url in active_endpoints.items():
         mf = _fetch_model(name, url, lat, lon)
         if mf.valid:
             results.append(mf)
@@ -426,11 +486,21 @@ def generate_briefing(
         risk_windows: list of RiskWindow from identify_risk_windows
         climate_ctx: dict from fetch_climate_context_cached (optional)
     """
+    # Expected ensemble is always 4 models: 1 regional + GFS + ECMWF + ICON
+    # Missing models are inferred from expected names vs models_used
+    _expected = {"GFS", "ECMWF", "ICON"}
+    _used_names = {m.name for m in models}
+    _missing_global = [n for n in _expected if n not in _used_names]
+    # Regional model is implicit — if we have 3 globals but no 4th model, regional failed
+    _regional_used = [n for n in _used_names if n not in _expected]
+    if not _regional_used:
+        _missing_global.append("Regional")
+
     brief = EnsembleBriefing(
         generated_utc=datetime.now(timezone.utc),
         model_count=len(models),
         models_used=[m.name for m in models],
-        models_failed=[n for n in MODEL_ENDPOINTS if n not in [m.name for m in models]],
+        models_failed=_missing_global,
         blocks=blocks,
         risk_windows=risk_windows,
     )
