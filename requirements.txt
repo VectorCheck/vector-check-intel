@@ -9,4 +9,4 @@ timezonefinder>=6.0.0
 pytz>=2024.1
 plotly>=5.18.0
 fpdf2>=2.7.9
-pyIGRF>=0.3.3
+pygeomag>=1.1.0
