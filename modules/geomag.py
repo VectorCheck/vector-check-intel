@@ -4,14 +4,15 @@ VECTOR CHECK AERIAL GROUP INC. — Magnetic Declination Helper
 Computes magnetic declination (variation) for any location on Earth.
 
 PRIMARY PATH:
-    Uses pyIGRF (https://pypi.org/project/pyIGRF/) which embeds the full
-    IGRF-13 spherical harmonic coefficients. Accurate to ~0.5° globally,
-    updated every 5 years. Pure Python, no C dependencies.
+    Uses pygeomag (https://pypi.org/project/pygeomag/) which is a pure-Python
+    port of the official NOAA World Magnetic Model (WMM). The package bundles
+    the WMM 2025 coefficient file and requires no external data. Accurate to
+    ~0.5° globally, valid 2025.0 - 2030.0.
 
 FALLBACK PATH:
-    If pyIGRF is not installed, falls back to a coarse 15°-grid lookup
-    table (typical error 2-5°). Still accurate enough for the Kestrel 5500
-    vane (±5°) but less precise. A warning is logged on first use.
+    If pygeomag is not installed OR fails to initialize, falls back to a
+    coarse 15° lookup table (typical error 2-5°). Still within Kestrel 5500
+    vane tolerance (~±5°) but much less precise.
 
 SIGN CONVENTION:
     Positive = East declination (magnetic north is east of true north)
@@ -26,20 +27,26 @@ from datetime import datetime
 
 logger = logging.getLogger("arms.geomag")
 
-# Try to import pyIGRF. If unavailable, _pyigrf_available stays False
-# and the fallback lookup table is used.
+# Try to import and initialize pygeomag. The library ships a default WMM
+# coefficient file with the package, so no external file is required.
+_geomag_instance = None
 try:
-    import pyIGRF
-    _pyigrf_available = True
-except ImportError:
-    _pyigrf_available = False
-    logger.info("pyIGRF not installed; using coarse declination lookup table. "
-                "Install with: pip install pyIGRF")
+    from pygeomag import GeoMag
+    # No coefficients_file argument = uses packaged default (WMM 2025)
+    _geomag_instance = GeoMag()
+    _geomag_available = True
+except Exception as e:
+    _geomag_available = False
+    logger.info(
+        "pygeomag unavailable (%s); falling back to coarse declination lookup. "
+        "Install with: pip install pygeomag",
+        e,
+    )
 
 
 # =============================================================================
 # FALLBACK LOOKUP TABLE — coarse 15° grid, WMM 2025 epoch
-# Used only when pyIGRF is unavailable. Not as accurate, but works offline.
+# Used only when pygeomag is unavailable. Not as accurate, but works offline.
 # =============================================================================
 
 _FALLBACK_GRID = {
@@ -73,28 +80,23 @@ _FALLBACK_GRID = {
     (-75, 0): -50.0, (-75, 90): 120.0, (-75, -90): 40.0, (-75, 180): 150.0,
 }
 
-_GRID_STEP = 15.0
-
 
 def _fallback_lookup(lat: float, lon: float) -> float:
     """Inverse-distance-weighted interpolation from the coarse grid."""
-    # Normalize longitude to [-180, 180]
     while lon > 180: lon -= 360
     while lon < -180: lon += 360
 
     total_w = 0.0
     total_wv = 0.0
     for (g_lat, g_lon), val in _FALLBACK_GRID.items():
-        # Use great-circle-ish distance in degrees
         dlat = lat - g_lat
         dlon = lon - g_lon
-        # Wrap longitude distance
         if dlon > 180: dlon -= 360
         if dlon < -180: dlon += 360
         d = (dlat * dlat + dlon * dlon) ** 0.5
         if d < 0.1:
             return round(val, 1)
-        w = 1.0 / (d ** 3)  # cubic inverse-distance emphasizes nearest points
+        w = 1.0 / (d ** 3)
         total_w += w
         total_wv += w * val
 
@@ -118,26 +120,22 @@ def get_magnetic_declination(lat: float, lon: float, date: datetime = None) -> f
     Returns:
         Declination in degrees. Positive = East, Negative = West.
 
-        With pyIGRF: typical accuracy < 0.5°.
-        Without pyIGRF: typical accuracy 2-5°, can be worse in polar regions.
+        With pygeomag: typical accuracy < 0.5°.
+        Without pygeomag: typical accuracy 2-5°.
     """
     if date is None:
         date = datetime.utcnow()
 
-    # Convert date to decimal year for IGRF
+    # Convert to decimal year for WMM
     year_start = datetime(date.year, 1, 1)
     year_end = datetime(date.year + 1, 1, 1)
     year_frac = date.year + (date - year_start).total_seconds() / (year_end - year_start).total_seconds()
 
-    if _pyigrf_available:
+    if _geomag_available and _geomag_instance is not None:
         try:
-            # pyIGRF.igrf_value(lat, lon, altitude_km, year) returns:
-            #   (D, I, H, X, Y, Z, F) where D is declination in degrees
-            result = pyIGRF.igrf_value(lat, lon, 0.0, year_frac)
-            declination = result[0]
-            return round(declination, 1)
+            result = _geomag_instance.calculate(glat=lat, glon=lon, alt=0, time=year_frac)
+            return round(result.d, 1)
         except Exception as e:
-            logger.warning("pyIGRF calculation failed at %f,%f: %s — falling back", lat, lon, e)
+            logger.warning("pygeomag calculation failed at %f,%f: %s — falling back", lat, lon, e)
 
-    # Fallback path
     return _fallback_lookup(lat, lon)
