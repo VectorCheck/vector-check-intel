@@ -28,6 +28,7 @@ from modules.ensemble_analysis import (
 from modules.model_performance import (
     compute_performance_scorecard,
     grade_wind_mae, grade_gust_mae, grade_temp_mae, grade_pressure_mae,
+    grade_dir_mae, grade_rh_mae, grade_vis_mae,
     GRADE_COLORS,
 )
 from modules.geomag import get_magnetic_declination
@@ -1988,7 +1989,7 @@ else:
     _ens_brief = generate_briefing(_ens_models, _ens_blocks, _ens_risks, _climate_for_ens)
 
     # Two-column layout: ensemble consensus on the left, performance scorecard on the right
-    _ma_left, _ma_right = st.columns([3, 2])
+    _ma_left, _ma_right = st.columns([5, 4])
 
     with _ma_left:
         # --- Header: model count + confidence badge ---
@@ -2119,7 +2120,7 @@ else:
 
         st.markdown(
             '<div style="font-size:0.72rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
-            'margin-bottom:8px;font-weight:500;">Performance vs Actuals (24h)</div>',
+            'margin-bottom:8px;font-weight:500;">Performance vs Actuals</div>',
             unsafe_allow_html=True,
         )
 
@@ -2130,37 +2131,62 @@ else:
                 unsafe_allow_html=True,
             )
         else:
+            # Explicit timeframe — display the actual paired-observation window
+            # converted to the operator's local timezone for clarity.
+            _ws = _sc.get("window_start_utc")
+            _we = _sc.get("window_end_utc")
+            _tf_str = "trailing 24 hours"
+            if _ws and _we:
+                try:
+                    _ws_local = _ws.astimezone(local_tz)
+                    _we_local = _we.astimezone(local_tz)
+                    _tz_abbr = _ws_local.strftime('%Z') or 'UTC'
+                    _tf_str = (
+                        f"{_ws_local.strftime('%d %b %H:%M')} \u2192 "
+                        f"{_we_local.strftime('%d %b %H:%M')} {_tz_abbr}"
+                    )
+                except Exception:
+                    pass
+
             # Source summary line
             _src_parts = []
             if _sc["metar_count"] > 0:
                 _src_parts.append(f'{_sc["metar_count"]} METAR')
             if _sc["kestrel_count"] > 0:
                 _src_parts.append(f'{_sc["kestrel_count"]} Kestrel')
-            _src_str = " + ".join(_src_parts) + " observations"
+            _src_str = " + ".join(_src_parts) + " obs"
 
             _best = _sc.get("best_performer")
             _best_html = ""
             if _best:
                 _best_html = (
-                    f'<span style="font-size:0.68rem;color:#4ade80;font-weight:600;'
+                    f'<span style="font-size:0.7rem;color:#4ade80;font-weight:600;'
                     f'margin-left:8px;">Best: {_best}</span>'
                 )
 
             st.markdown(
-                f'<div style="font-size:0.72rem;color:#9CA3AF;margin-bottom:10px;">'
+                f'<div style="font-size:0.72rem;color:#D1D5DB;margin-bottom:4px;font-weight:500;">'
+                f'Window: {_tf_str}</div>'
+                f'<div style="font-size:0.7rem;color:#9CA3AF;margin-bottom:10px;">'
                 f'{_src_str}{_best_html}</div>',
                 unsafe_allow_html=True,
             )
 
-            # Table header
+            # Table layout: model name + 7 metric columns
+            # Total grid width ~ 70 + 7*44 = 378px (fits comfortably in widened right column)
+            _grid_template = "70px 44px 44px 44px 44px 44px 44px 44px"
+
             _sc_header = (
-                '<div style="display:grid;grid-template-columns:75px 50px 50px 50px 50px;gap:1px;margin-bottom:1px;">'
-                '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.3px;">Model</div>'
-                '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Wind</div>'
-                '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Gust</div>'
-                '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Temp</div>'
-                '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Press</div>'
-                '</div>'
+                f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;margin-bottom:1px;">'
+                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;letter-spacing:0.3px;">Model</div>'
+                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Wind</div>'
+                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Dir</div>'
+                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Gust</div>'
+                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Temp</div>'
+                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">RH</div>'
+                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Press</div>'
+                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Vis</div>'
+                f'</div>'
             )
             st.markdown(_sc_header, unsafe_allow_html=True)
 
@@ -2171,49 +2197,62 @@ else:
                 _name_style = "color:#4ade80;font-weight:600;" if _is_best else "color:#D1D5DB;"
 
                 if _m["status"] == "UNAVAILABLE":
+                    _empty_cell = f'<div style="font-size:0.7rem;color:#6B7280;padding:3px 4px;background:{_row_bg};text-align:center;">\u2014</div>'
                     _sc_row = (
-                        f'<div style="display:grid;grid-template-columns:75px 50px 50px 50px 50px;gap:1px;">'
-                        f'<div style="font-size:0.78rem;{_name_style}padding:3px 6px;background:{_row_bg};">{_name}</div>'
-                        f'<div style="font-size:0.7rem;color:#6B7280;padding:3px 6px;background:{_row_bg};" colspan="4">n/a</div>'
-                        f'<div style="font-size:0.7rem;color:#6B7280;padding:3px 6px;background:{_row_bg};">\u2014</div>'
-                        f'<div style="font-size:0.7rem;color:#6B7280;padding:3px 6px;background:{_row_bg};">\u2014</div>'
-                        f'<div style="font-size:0.7rem;color:#6B7280;padding:3px 6px;background:{_row_bg};">\u2014</div>'
+                        f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;">'
+                        f'<div style="font-size:0.76rem;{_name_style}padding:3px 4px;background:{_row_bg};">{_name}</div>'
+                        f'{_empty_cell * 7}'
                         f'</div>'
                     )
                     st.markdown(_sc_row, unsafe_allow_html=True)
                     continue
 
                 # Cells with grade-coded colors
-                def _cell(mae, grade_fn, unit):
+                def _cell(mae, grade_fn, fmt="{:.1f}"):
                     if mae is None:
                         return ("#6B7280", "\u2014")
                     grade = grade_fn(mae)
                     clr = GRADE_COLORS.get(grade, "#9CA3AF")
-                    return (clr, f"{mae:.1f}{unit}")
+                    return (clr, fmt.format(mae))
 
-                _w_clr, _w_val = _cell(_m["wind_mae_kt"], grade_wind_mae, "")
-                _g_clr, _g_val = _cell(_m["gust_mae_kt"], grade_gust_mae, "")
-                _t_clr, _t_val = _cell(_m["temp_mae_c"], grade_temp_mae, "")
-                _p_clr, _p_val = _cell(_m["pressure_mae_hpa"], grade_pressure_mae, "")
+                _w_clr, _w_val = _cell(_m["wind_mae_kt"], grade_wind_mae)
+                _d_clr, _d_val = _cell(_m["dir_mae_deg"], grade_dir_mae, "{:.0f}")
+                _g_clr, _g_val = _cell(_m["gust_mae_kt"], grade_gust_mae)
+                _t_clr, _t_val = _cell(_m["temp_mae_c"], grade_temp_mae)
+                _rh_clr, _rh_val = _cell(_m["rh_mae_pct"], grade_rh_mae, "{:.0f}")
+                _p_clr, _p_val = _cell(_m["pressure_mae_hpa"], grade_pressure_mae)
+                _v_clr, _v_val = _cell(_m["vis_mae_sm"], grade_vis_mae)
+
+                def _datacell(clr, val, weight="400"):
+                    return (
+                        f'<div style="font-size:0.74rem;color:{clr};padding:3px 4px;'
+                        f'background:{_row_bg};font-variant-numeric:tabular-nums;'
+                        f'font-weight:{weight};text-align:center;">{val}</div>'
+                    )
 
                 _sc_row = (
-                    f'<div style="display:grid;grid-template-columns:75px 50px 50px 50px 50px;gap:1px;">'
-                    f'<div style="font-size:0.78rem;{_name_style}padding:3px 6px;background:{_row_bg};">{_name}</div>'
-                    f'<div style="font-size:0.75rem;color:{_w_clr};padding:3px 6px;background:{_row_bg};font-variant-numeric:tabular-nums;font-weight:500;">{_w_val}</div>'
-                    f'<div style="font-size:0.75rem;color:{_g_clr};padding:3px 6px;background:{_row_bg};font-variant-numeric:tabular-nums;">{_g_val}</div>'
-                    f'<div style="font-size:0.75rem;color:{_t_clr};padding:3px 6px;background:{_row_bg};font-variant-numeric:tabular-nums;">{_t_val}</div>'
-                    f'<div style="font-size:0.75rem;color:{_p_clr};padding:3px 6px;background:{_row_bg};font-variant-numeric:tabular-nums;">{_p_val}</div>'
+                    f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;">'
+                    f'<div style="font-size:0.76rem;{_name_style}padding:3px 4px;background:{_row_bg};">{_name}</div>'
+                    f'{_datacell(_w_clr, _w_val, "500")}'
+                    f'{_datacell(_d_clr, _d_val)}'
+                    f'{_datacell(_g_clr, _g_val)}'
+                    f'{_datacell(_t_clr, _t_val)}'
+                    f'{_datacell(_rh_clr, _rh_val)}'
+                    f'{_datacell(_p_clr, _p_val)}'
+                    f'{_datacell(_v_clr, _v_val)}'
                     f'</div>'
                 )
                 st.markdown(_sc_row, unsafe_allow_html=True)
 
-            # Legend
+            # Legend with units callout
             st.markdown(
-                '<div style="font-size:0.65rem;color:#6B7280;margin-top:8px;line-height:1.4;">'
-                'Values are mean absolute error (MAE). '
+                '<div style="font-size:0.62rem;color:#6B7280;margin-top:8px;line-height:1.4;">'
+                'MAE units: Wind/Gust kt \u00b7 Dir \u00b0 \u00b7 Temp \u00b0C \u00b7 '
+                'RH % \u00b7 Press hPa \u00b7 Vis sm. '
                 '<span style="color:#4ade80;">green</span> = within tolerance, '
                 '<span style="color:#E58E26;">amber</span> = drifting, '
-                '<span style="color:#ff6b4a;">red</span> = systematically off.'
+                '<span style="color:#ff6b4a;">red</span> = systematically off. '
+                'Direction excludes calm/light wind hours.'
                 '</div>',
                 unsafe_allow_html=True,
             )
