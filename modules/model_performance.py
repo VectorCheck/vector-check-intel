@@ -48,10 +48,12 @@ from modules.ensemble_analysis import (
     USER_AGENT,
 )
 
-# Variables needed for the scorecard
+# Variables needed for the scorecard. Visibility is returned by all 4 ensemble
+# endpoints (HRDPS, GFS, ECMWF, ICON) — Open-Meteo serves visibility for the
+# standard 10m wind/2m temp endpoints uniformly across these models.
 _PERF_VARS = (
     "wind_speed_10m,wind_direction_10m,wind_gusts_10m,"
-    "temperature_2m,surface_pressure,relative_humidity_2m"
+    "temperature_2m,surface_pressure,relative_humidity_2m,visibility"
 )
 
 # MAE tolerance thresholds (green / amber / red)
@@ -63,6 +65,12 @@ TEMP_MAE_GOOD_C = 1.5
 TEMP_MAE_WARN_C = 3.0
 PRESSURE_MAE_GOOD_HPA = 1.5
 PRESSURE_MAE_WARN_HPA = 3.0
+RH_MAE_GOOD_PCT = 5.0      # RH errors are typically small
+RH_MAE_WARN_PCT = 12.0
+DIR_MAE_GOOD_DEG = 15.0    # within a typical wind direction sector
+DIR_MAE_WARN_DEG = 30.0
+VIS_MAE_GOOD_SM = 1.0      # visibility error tolerances (statute miles)
+VIS_MAE_WARN_SM = 3.0
 
 
 # =============================================================================
@@ -134,6 +142,9 @@ def _fetch_model_history(model_name: str, endpoint_url: str, lat: float, lon: fl
         "temp_c": _pick("temperature_2m"),
         "pressure_hpa": _pick("surface_pressure"),
         "rh": _pick("relative_humidity_2m"),
+        # Open-Meteo returns visibility in meters; convert to statute miles
+        # to match METAR's vsby field. Some endpoints don't include this.
+        "visibility_sm": _pick("visibility", 1.0 / 1609.344),
     }
 
 
@@ -171,7 +182,7 @@ def fetch_metar_history(icao: str, hours: int = 24) -> list:
     for row in data:
         try:
             # API returns fields like 'obsTime' (unix), 'temp', 'dewp',
-            # 'wdir', 'wspd', 'wgst', 'altim' (hPa), 'slp' (hPa)
+            # 'wdir', 'wspd', 'wgst', 'altim' (hPa), 'slp' (hPa), 'visib' (sm)
             obs_time = row.get("obsTime") or row.get("reportTime")
             if obs_time is None:
                 continue
@@ -194,15 +205,43 @@ def fetch_metar_history(icao: str, hours: int = 24) -> list:
 
             wspd = _safe_float("wspd")   # knots
             wgst = _safe_float("wgst")   # knots
-            wdir = _safe_float("wdir")   # degrees true
+
+            # Wind direction can be the string "VRB" for variable winds at low
+            # speeds — these reports are not directionally meaningful and must
+            # be excluded from direction MAE.
+            wdir_raw = row.get("wdir")
+            if wdir_raw is None or wdir_raw == "" or wdir_raw == "VRB":
+                wdir = None
+            else:
+                try:
+                    wdir = float(wdir_raw)
+                except (TypeError, ValueError):
+                    wdir = None
+
             temp = _safe_float("temp")   # Celsius
+            dewp = _safe_float("dewp")   # Celsius
             altim = _safe_float("altim") # hPa (altimeter setting)
             slp = _safe_float("slp")     # hPa sea level pressure
+            visib = _safe_float("visib") # statute miles
 
             # METAR station pressure isn't always directly available — altim is
             # sea-level-adjusted. For a scorecard use altim as a reasonable
             # approximation at low-elevation airports.
             pressure = altim if altim is not None else slp
+
+            # Compute RH from temp and dewpoint using the August-Roche-Magnus
+            # approximation. Both must be present.
+            rh = None
+            if temp is not None and dewp is not None:
+                try:
+                    import math
+                    a, b = 17.625, 243.04
+                    alpha_t = (a * temp) / (b + temp)
+                    alpha_d = (a * dewp) / (b + dewp)
+                    rh = 100.0 * math.exp(alpha_d - alpha_t)
+                    rh = max(0.0, min(100.0, rh))
+                except Exception:
+                    rh = None
 
             observations.append({
                 "time": t,
@@ -211,6 +250,8 @@ def fetch_metar_history(icao: str, hours: int = 24) -> list:
                 "gust_kt": wgst,
                 "temp_c": temp,
                 "pressure_hpa": pressure,
+                "rh": rh,
+                "visibility_sm": visib,
             })
         except Exception:
             continue
@@ -235,7 +276,7 @@ def fetch_kestrel_sessions_24h(sb_client, lat: float, lon: float) -> list:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         result = (
             sb_client.table("forecast_verifications")
-            .select("timestamp,actual_wind_kt,actual_wind_dir,actual_temp_c,actual_pressure_hpa")
+            .select("timestamp,actual_wind_kt,actual_wind_dir,actual_temp_c,actual_pressure_hpa,actual_rh")
             .gte("timestamp", cutoff)
             .gte("lat", lat - 0.2).lte("lat", lat + 0.2)
             .gte("lon", lon - 0.2).lte("lon", lon + 0.2)
@@ -260,6 +301,8 @@ def fetch_kestrel_sessions_24h(sb_client, lat: float, lon: float) -> list:
                 "gust_kt": None,  # Kestrel session average doesn't capture instantaneous gusts reliably
                 "temp_c": row.get("actual_temp_c"),
                 "pressure_hpa": row.get("actual_pressure_hpa"),
+                "rh": row.get("actual_rh"),
+                "visibility_sm": None,  # Kestrel does not measure visibility
                 "source": "KESTREL",
             })
         except Exception:
@@ -309,33 +352,58 @@ def compute_model_mae(model_history: dict, observations: list) -> dict:
         observations: list of observation dicts (METAR + Kestrel combined)
 
     Returns:
-        dict with wind_mae_kt, gust_mae_kt, temp_mae_c, pressure_mae_hpa,
-        sample_count, and per-variable sample counts.
+        dict with MAE per variable, sample counts, and time bounds of the
+        paired observations actually used.
     """
     result = {
         "wind_mae_kt": None,
+        "dir_mae_deg": None,
         "gust_mae_kt": None,
         "temp_mae_c": None,
         "pressure_mae_hpa": None,
+        "rh_mae_pct": None,
+        "vis_mae_sm": None,
         "sample_count": 0,
-        "wind_n": 0, "gust_n": 0, "temp_n": 0, "pressure_n": 0,
+        "wind_n": 0, "dir_n": 0, "gust_n": 0, "temp_n": 0,
+        "pressure_n": 0, "rh_n": 0, "vis_n": 0,
+        "earliest_obs_time": None,
+        "latest_obs_time": None,
     }
 
     if not model_history or not observations:
         return result
 
-    wind_errs, gust_errs, temp_errs, pressure_errs = [], [], [], []
+    wind_errs, dir_errs, gust_errs = [], [], []
+    temp_errs, pressure_errs = [], []
+    rh_errs, vis_errs = [], []
+    matched_times = []
+
+    def _shortest_arc(a: float, b: float) -> float:
+        """Shortest absolute angular distance between two bearings."""
+        d = abs(((a - b) + 180) % 360 - 180)
+        return d
 
     for obs in observations:
         idx = _match_forecast_to_observation(obs["time"], model_history["times"])
         if idx < 0:
             continue
 
+        matched_times.append(obs["time"])
+
         # Wind speed
         fw = model_history["wind_kt"][idx] if idx < len(model_history["wind_kt"]) else None
         ow = obs.get("wind_kt")
         if fw is not None and ow is not None:
             wind_errs.append(abs(fw - ow))
+
+        # Wind direction (shortest-arc; only meaningful when wind is non-trivial)
+        fd = model_history["wind_dir"][idx] if idx < len(model_history["wind_dir"]) else None
+        od = obs.get("wind_dir")
+        # Skip direction comparison for calm/light winds where direction is
+        # poorly defined (METAR uses VRB at low speeds; we already null those,
+        # but also exclude observations with reported wind speed < 3 kt)
+        if fd is not None and od is not None and (ow is None or ow >= 3.0):
+            dir_errs.append(_shortest_arc(fd, od))
 
         # Gust
         fg = model_history["gust_kt"][idx] if idx < len(model_history["gust_kt"]) else None
@@ -355,18 +423,44 @@ def compute_model_mae(model_history: dict, observations: list) -> dict:
         if fp is not None and op is not None:
             pressure_errs.append(abs(fp - op))
 
+        # RH
+        frh = model_history["rh"][idx] if idx < len(model_history["rh"]) else None
+        orh = obs.get("rh")
+        if frh is not None and orh is not None:
+            rh_errs.append(abs(frh - orh))
+
+        # Visibility (statute miles; capped at 10 sm because METAR reports >10 sm
+        # as "10+" and the model values can be very high in clear conditions —
+        # capping prevents runaway error from a single near-perfect observation)
+        fv = model_history["visibility_sm"][idx] if idx < len(model_history["visibility_sm"]) else None
+        ov = obs.get("visibility_sm")
+        if fv is not None and ov is not None:
+            fv_capped = min(fv, 10.0)
+            ov_capped = min(ov, 10.0)
+            vis_errs.append(abs(fv_capped - ov_capped))
+
     def _mae(errs):
         return round(sum(errs) / len(errs), 1) if errs else None
 
     result["wind_mae_kt"] = _mae(wind_errs)
+    result["dir_mae_deg"] = _mae(dir_errs)
     result["gust_mae_kt"] = _mae(gust_errs)
     result["temp_mae_c"] = _mae(temp_errs)
     result["pressure_mae_hpa"] = _mae(pressure_errs)
+    result["rh_mae_pct"] = _mae(rh_errs)
+    result["vis_mae_sm"] = _mae(vis_errs)
     result["sample_count"] = len(observations)
     result["wind_n"] = len(wind_errs)
+    result["dir_n"] = len(dir_errs)
     result["gust_n"] = len(gust_errs)
     result["temp_n"] = len(temp_errs)
     result["pressure_n"] = len(pressure_errs)
+    result["rh_n"] = len(rh_errs)
+    result["vis_n"] = len(vis_errs)
+
+    if matched_times:
+        result["earliest_obs_time"] = min(matched_times)
+        result["latest_obs_time"] = max(matched_times)
 
     return result
 
@@ -374,7 +468,15 @@ def compute_model_mae(model_history: dict, observations: list) -> dict:
 def _composite_score(mae_dict: dict) -> float:
     """Computes a weighted composite error score for ranking.
 
-    Lower is better. Wind gets heaviest weight since it's the primary UAS risk.
+    Lower is better. Weights reflect operational impact for UAS operations:
+        wind     × 3.0  (primary hazard)
+        gust     × 2.0  (excursion-driver)
+        dir      × 0.05 (per degree, capped influence)
+        temp     × 1.0
+        pressure × 0.5
+        rh       × 0.05 (per percent)
+        vis      × 0.5  (per statute mile)
+
     Returns infinity if no wind MAE is available (model can't be ranked).
     """
     w = mae_dict.get("wind_mae_kt")
@@ -387,6 +489,10 @@ def _composite_score(mae_dict: dict) -> float:
     if g is not None:
         score += g * 2.0
 
+    d = mae_dict.get("dir_mae_deg")
+    if d is not None:
+        score += d * 0.05
+
     t = mae_dict.get("temp_mae_c")
     if t is not None:
         score += t * 1.0
@@ -394,6 +500,14 @@ def _composite_score(mae_dict: dict) -> float:
     p = mae_dict.get("pressure_mae_hpa")
     if p is not None:
         score += p * 0.5
+
+    rh = mae_dict.get("rh_mae_pct")
+    if rh is not None:
+        score += rh * 0.05
+
+    v = mae_dict.get("vis_mae_sm")
+    if v is not None:
+        score += v * 0.5
 
     return score
 
@@ -458,10 +572,14 @@ def compute_performance_scorecard(
             model_results.append({
                 "name": name,
                 "status": "UNAVAILABLE",
-                "wind_mae_kt": None, "gust_mae_kt": None,
-                "temp_mae_c": None, "pressure_mae_hpa": None,
+                "wind_mae_kt": None, "dir_mae_deg": None,
+                "gust_mae_kt": None, "temp_mae_c": None,
+                "pressure_mae_hpa": None, "rh_mae_pct": None,
+                "vis_mae_sm": None,
                 "sample_count": 0,
-                "wind_n": 0, "gust_n": 0, "temp_n": 0, "pressure_n": 0,
+                "wind_n": 0, "dir_n": 0, "gust_n": 0,
+                "temp_n": 0, "pressure_n": 0, "rh_n": 0, "vis_n": 0,
+                "earliest_obs_time": None, "latest_obs_time": None,
                 "composite_score": float("inf"),
             })
             continue
@@ -476,12 +594,21 @@ def compute_performance_scorecard(
     scorable = [m for m in model_results if m.get("composite_score", float("inf")) < float("inf")]
     best = min(scorable, key=lambda m: m["composite_score"])["name"] if scorable else None
 
+    # Compute the actual evaluation window from the matched observations across
+    # all models — gives the operator the precise timeframe being scored.
+    all_starts = [m.get("earliest_obs_time") for m in model_results if m.get("earliest_obs_time")]
+    all_ends = [m.get("latest_obs_time") for m in model_results if m.get("latest_obs_time")]
+    window_start = min(all_starts) if all_starts else None
+    window_end = max(all_ends) if all_ends else None
+
     return {
         "models": model_results,
         "best_performer": best,
         "observation_count": len(all_observations),
         "metar_count": len(metar_obs),
         "kestrel_count": len(kestrel_obs),
+        "window_start_utc": window_start,
+        "window_end_utc": window_end,
         "has_data": True,
     }
 
@@ -516,6 +643,27 @@ def grade_pressure_mae(mae: float) -> str:
     if mae is None: return "NONE"
     if mae <= PRESSURE_MAE_GOOD_HPA: return "GOOD"
     if mae <= PRESSURE_MAE_WARN_HPA: return "WARN"
+    return "POOR"
+
+
+def grade_dir_mae(mae: float) -> str:
+    if mae is None: return "NONE"
+    if mae <= DIR_MAE_GOOD_DEG: return "GOOD"
+    if mae <= DIR_MAE_WARN_DEG: return "WARN"
+    return "POOR"
+
+
+def grade_rh_mae(mae: float) -> str:
+    if mae is None: return "NONE"
+    if mae <= RH_MAE_GOOD_PCT: return "GOOD"
+    if mae <= RH_MAE_WARN_PCT: return "WARN"
+    return "POOR"
+
+
+def grade_vis_mae(mae: float) -> str:
+    if mae is None: return "NONE"
+    if mae <= VIS_MAE_GOOD_SM: return "GOOD"
+    if mae <= VIS_MAE_WARN_SM: return "WARN"
     return "POOR"
 
 
