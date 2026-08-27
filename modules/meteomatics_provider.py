@@ -224,6 +224,55 @@ _MODEL_MISSING_SURFACE_PARAMS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# BELOW-GROUND PRESSURE LEVELS
+# ---------------------------------------------------------------------------
+# At elevated sites the lowest isobaric surfaces are underground and no NWP
+# provider serves them. Meteomatics answers HTTP 404, and because it applies
+# all-or-nothing semantics per request that 404 takes down the whole batch.
+# Observed at 27.7N 85.3E (Kathmandu, ~1400 m): 1000 hPa and 975 hPa are below
+# ground, so gh/t/rh at those levels 404'd. Requesting them was never going to
+# work, so we filter them out up front — correct meteorology, and it saves a
+# whole 10-parameter batch of quota at every elevated site.
+_ELEV_CACHE: dict = {}
+
+
+def _surface_pressure_hpa(elev_m: float) -> float:
+    """ISA surface pressure for a geometric elevation (hPa)."""
+    return 1013.25 * (1.0 - 2.25577e-5 * max(0.0, elev_m)) ** 5.25588
+
+
+def _below_ground_levels(lat: float, lon: float) -> list:
+    """Pressure levels that lie under the terrain at this site.
+
+    Uses the cached elevation probe (can_trip=False — never affects the
+    circuit). On any failure returns [] so behaviour is unchanged from
+    today: request everything and let partial-parameter tolerance cope.
+    """
+    key = (round(lat, 2), round(lon, 2))
+    if key in _ELEV_CACHE:
+        elev = _ELEV_CACHE[key]
+    else:
+        try:
+            elev = float(fetch_meteomatics_elevation(lat, lon))
+        except Exception:
+            elev = 0.0
+        _ELEV_CACHE[key] = elev
+    if elev <= 150.0:          # near sea level — every standard level is valid
+        return []
+    # Margin calibrated against observed behaviour, NOT theory. At Kathmandu
+    # (p_sfc ~856 hPa) Meteomatics served 900/925/950 — extrapolated
+    # below-ground values, which NWP output commonly includes — but 404'd
+    # 975 and 1000. So the true cutoff is well below the surface, not at it.
+    # A 100 hPa margin reproduces that boundary exactly and leaves every
+    # Canadian detachment untouched (Cold Lake at 950 hPa drops nothing).
+    # Deliberately conservative: under-dropping costs nothing because the
+    # partial-parameter tolerance still handles any 404 that slips through,
+    # whereas over-dropping would discard data the provider does serve.
+    p_sfc = _surface_pressure_hpa(elev)
+    return [lv for lv in _PRESSURE_LEVELS if lv > p_sfc + 100.0]
+
+
 def _build_blocklist_for_model(model: str) -> set:
     """Computes the full set of unsupported Meteomatics parameter names for
     a given model. Combines surface gaps (from _MODEL_MISSING_SURFACE_PARAMS)
@@ -965,6 +1014,22 @@ def fetch_meteomatics_forecast(
     pairs = _filter_params_for_model(_build_param_list(), model_id)
     om_names = [p[0] for p in pairs]
     mm_params_all = [p[1] for p in pairs]
+    # Drop isobaric levels that are under the terrain at this site before
+    # batching — they can only ever 404.
+    _bg_levels = _below_ground_levels(lat, lon)
+    if _bg_levels:
+        _bg_names = set()
+        for _lv in _bg_levels:
+            _bg_names.update({
+                f"t_{_lv}hPa:C", f"relative_humidity_{_lv}hPa:p",
+                f"gh_{_lv}hPa:m", f"wind_speed_{_lv}hPa:kn",
+                f"wind_dir_{_lv}hPa:d",
+            })
+        _before = len(mm_params_all)
+        mm_params_all = [p for p in mm_params_all if p not in _bg_names]
+        logger.info("Below-ground levels at %.3f,%.3f: %s — dropped %d params",
+                    lat, lon, _bg_levels, _before - len(mm_params_all))
+
     batches = _chunked(mm_params_all, METEOMATICS_BATCH_SIZE)
 
     # Fire all batches in parallel
