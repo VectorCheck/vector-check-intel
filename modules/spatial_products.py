@@ -534,18 +534,40 @@ def fetch_star_frames(cdn_dir: str, sector: str, band: str, n: int = 6):
     """Last n frame URLs+times from the STAR directory listing. Filenames
     embed YYYYDDDHHMM; we animate only frames the listing confirms."""
     try:
-        base = f"{STAR_BASE}/{cdn_dir}/ABI/"
-        # CONUS and FD are top-level product dirs on STAR; only the small
-        # regional web sectors live under SECTOR/.
-        if sector in ("FD", "CONUS"):
-            base += f"{sector}/"
+        # Candidate listing directories, tried in order until one yields
+        # frames. GOES uses the ABI tree (CONUS/FD top-level, small regional
+        # sectors under SECTOR/). Himawari carries AHI — not ABI — and STAR
+        # does not mirror it under the GOES layout, so the single hardcoded
+        # ABI path blacked out the whole eastern hemisphere. Probing avoids
+        # betting the pane on one guessed path.
+        if cdn_dir.upper().startswith("HIMAWARI"):
+            candidates = [
+                f"{STAR_BASE}/{cdn_dir}/FULL_DISK/{band}/",
+                f"{STAR_BASE}/{cdn_dir}/AHI/FD/{band}/",
+                f"{STAR_BASE}/{cdn_dir}/ABI/FD/{band}/",
+                f"{STAR_BASE}/{cdn_dir}/{band}/",
+            ]
         else:
-            base += f"SECTOR/{sector}/"
-        base += f"{band}/"
-        req = urllib.request.Request(base, headers={
-            "User-Agent": "VectorCheck-ARMS/2.1"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            listing = r.read().decode("utf-8", "replace")
+            _mid = (f"{sector}/" if sector in ("FD", "CONUS")
+                    else f"SECTOR/{sector}/")
+            candidates = [f"{STAR_BASE}/{cdn_dir}/ABI/{_mid}{band}/"]
+
+        listing, base = None, None
+        for _cand in candidates:
+            try:
+                req = urllib.request.Request(_cand, headers={
+                    "User-Agent": "VectorCheck-ARMS/2.1"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    _body = r.read().decode("utf-8", "replace")
+                if ".jpg" in _body:
+                    listing, base = _body, _cand
+                    break
+            except Exception:
+                continue
+        if listing is None:
+            logger.warning("STAR: no reachable listing for %s/%s/%s (tried %d)",
+                           cdn_dir, sector, band, len(candidates))
+            return []
         # Prefer 1200px-class files; FD uses 1808; fall back to any size
         pat = _re.compile(r'href="((\d{11})_[^"]*?-(1200x1200|1808x1808|2500x1500|1250x750)\.jpg)"')
         hits = pat.findall(listing)
