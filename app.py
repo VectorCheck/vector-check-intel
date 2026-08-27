@@ -1363,7 +1363,8 @@ if _workspace == "Spatial":
     import streamlit.components.v1 as _components
     try:
         from modules.spatial_quad import (build_quad_html, nearest_stations,
-                                          beam_height_ft, SAT_PRODUCTS)
+                                          beam_height_ft, station_in_range,
+                                          STATION_MAX_RANGE_KM, SAT_PRODUCTS)
         from modules.spatial_products import (fetch_rainviewer_catalog,
                                               pick_star_view, fetch_star_frames,
                                               STAR_BANDS,
@@ -1418,28 +1419,43 @@ if _workspace == "Spatial":
                            horizontal=True, key="spq_rmode")
     _sta_id, _prod_code, _sta_cc = None, "N0Q", None
     if _r_mode == "Station":
-        _near = nearest_stations(lat, lon, n=10)
-        _sta_opts = {}
-        for sid, nm, km, cc in _near:
-            _tag = "" if cc == "us" else " (CA composite)"
-            _sta_opts[f"{sid} \u00b7 {nm} \u00b7 {km:.0f} km{_tag}"] = (sid, km, cc)
-        with _q3:
-            _sta_pick = st.selectbox("Station", list(_sta_opts.keys()),
-                                     key="spq_station")
-        _sta_id, _sta_km, _sta_cc = _sta_opts[_sta_pick]
-        with _q4:
-            _prod_pick = st.selectbox(
-                "Product", ["Reflectivity 0.5\u00b0 (N0Q)",
-                            "Velocity 0.5\u00b0 Doppler (N0U)"],
-                key="spq_sprod", disabled=(_sta_cc == "ca"))
-            _prod_code = "N0U" if "N0U" in _prod_pick else "N0Q"
+        # Only sites close enough to actually sample this location's airspace.
+        # The catalog is North America only, so anywhere else correctly yields
+        # nothing rather than offering a radar 10,000 km away.
+        _near = [t for t in nearest_stations(lat, lon, n=10)
+                 if station_in_range(t[2])]
+        if not _near:
+            with _q3:
+                st.selectbox("Station", ["No radar site within range"],
+                             key="spq_station", disabled=True)
+            st.caption(
+                f"No catalogued single-site radar within {int(STATION_MAX_RANGE_KM)} km "
+                "of this location \u2014 showing the global composite instead. "
+                "Single-site mode currently covers North America only."
+            )
+            _r_mode = "Composite"
+        else:
+            _sta_opts = {}
+            for sid, nm, km, cc in _near:
+                _tag = "" if cc == "us" else " (CA composite)"
+                _sta_opts[f"{sid} \u00b7 {nm} \u00b7 {km:.0f} km{_tag}"] = (sid, km, cc)
+            with _q3:
+                _sta_pick = st.selectbox("Station", list(_sta_opts.keys()),
+                                         key="spq_station")
+            _sta_id, _sta_km, _sta_cc = _sta_opts[_sta_pick]
+            with _q4:
+                _prod_pick = st.selectbox(
+                    "Product", ["Reflectivity 0.5\u00b0 (N0Q)",
+                                "Velocity 0.5\u00b0 Doppler (N0U)"],
+                    key="spq_sprod", disabled=(_sta_cc == "ca"))
+                _prod_code = "N0U" if "N0U" in _prod_pick else "N0Q"
     else:
         with _q4:
             pass
     _sat_choice = st.radio("Satellite band", list(STAR_BANDS.keys()),
                            horizontal=True, key="spq_sat_band")
 
-    if _sta_id:
+    if _sta_id and beam_height_ft(_sta_km) is not None:
         _bft = beam_height_ft(_sta_km)
         st.markdown(
             f'<div style="font-size:0.68rem;color:#9CA3AF;margin:2px 0 6px;">'
@@ -1470,8 +1486,13 @@ if _workspace == "Spatial":
     _star_frames = _star_frames_cached(_star_cdn, _star_sec,
                                        STAR_BANDS[_sat_choice])
     _star_label = f"{_star_sat} {_star_sec.upper()} {_sat_choice}"
-    if _star_sec == "FD" and not (-170 < lon < -20 or 90 < lon < 180):
-        _star_label += " (nearest bird — Meteosat region unsupported)"
+    # Meteosat-only longitudes (roughly 20E-60E: Europe/Africa/Middle East)
+    # have no NOAA-hosted geostationary coverage. Everywhere else is served
+    # by GOES-East/West or Himawari, so the old test — which flagged anything
+    # outside two hardcoded windows — wrongly labelled well-covered sites
+    # such as 85.3E (Himawari, 55 deg from sub-satellite point).
+    if 20.0 <= lon <= 60.0:
+        _star_label += " (Meteosat region — no NOAA-hosted imagery)"
     _sta_scans = []
     if _sta_id and _sta_cc == "us":
         _sta_scans = _ridge_scans_cached(_sta_id, _prod_code)
@@ -1657,10 +1678,18 @@ elif "error" in data and data["error"]:
     # we fall through to the fatal-error stop.
     _substituted_from = None
     if data.get("_primary_failed") and not _has_fallback:
+        # Candidates are filtered to models that actually COVER this site.
+        # _in_coverage_models is the same list the sidebar dropdown is built
+        # from, so substitution can never offer something the operator
+        # couldn't have selected. Without this, a site outside HRDPS's domain
+        # (e.g. 27.7N 85.3E, Nepal) would attempt a Canada-only 2.5 km model
+        # and could surface out-of-domain data as an authoritative brief.
         _sub_candidates = ["HRDPS (Canada 2.5km)", "ECMWF IFS (Global 9km)",
                            "GFS (Global 13km)", "ICON (Global 13km)"]
         for _sub in _sub_candidates:
             if _sub == model_choice or _sub not in _all_models:
+                continue
+            if _sub not in _in_coverage_models:
                 continue
             _sub_data = fetch_weather_payload(lat, lon, _sub)
             if _sub_data and "error" not in _sub_data and "hourly" in _sub_data:
