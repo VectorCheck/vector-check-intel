@@ -1661,6 +1661,19 @@ if _health["failed_models"] and _health["last_failure_at"] is not None:
 
 st.divider()
 
+# Partial-parameter notice: the provider served the forecast but not every
+# requested field at this location. Informational — NOT a provider outage.
+if isinstance(data, dict) and data.get("_partial_params"):
+    _pp = data["_partial_params"]
+    _pp_short = ", ".join(p.split(":")[0] for p in _pp[:6])
+    st.info(
+        f"This location is outside {model_choice}'s coverage for "
+        f"{len(_pp)} requested parameter(s) ({_pp_short}"
+        f"{'…' if len(_pp) > 6 else ''}). The brief is rendered from the "
+        "parameters that are served; affected panels show as unavailable. "
+        "The provider is healthy — this is a data coverage limit."
+    )
+
 if data is None:
     st.error("⚠️ CRITICAL: Atmospheric Data API Offline.")
     st.stop()
@@ -2203,10 +2216,13 @@ vis_disp = "> 7 SM" if vis_sm > 7 else f"{vis_sm:.1f} SM"
 
 
 # --- 4. EXACT AGL INJECTION FOR TACTICAL STACK ---
-w_80_raw  = h.get('wind_speed_80m',   [None])[forecast_idx]
-w_120_raw = h.get('wind_speed_120m',  [None])[forecast_idx]
-d_80_raw  = h.get('wind_direction_80m',  [None])[forecast_idx]
-d_120_raw = h.get('wind_direction_120m', [None])[forecast_idx]
+# Safe accessors: with partial-parameter tolerance a provider may omit these
+# AGL fields entirely. The old `h.get(k, [None])[forecast_idx]` pattern only
+# survived index 0 and raised IndexError once the operator moved the slider.
+w_80_raw  = _h_at('wind_speed_80m')
+w_120_raw = _h_at('wind_speed_120m')
+d_80_raw  = _h_at('wind_direction_80m')
+d_120_raw = _h_at('wind_direction_120m')
 
 has_agl_data = w_80_raw is not None and w_120_raw is not None
 
