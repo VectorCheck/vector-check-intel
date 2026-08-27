@@ -987,7 +987,11 @@ def fetch_meteomatics_forecast(
     # one batch hits a transient hiccup is high — and an all-or-nothing merge
     # turned that single hiccup into "Meteomatics unavailable". This pass is
     # purely additive: it can only convert a failure into a success.
-    _failed_idx = [i for i, r in enumerate(results) if r.get("_batch_error")]
+    # 404 is deterministic (parameter genuinely not served for this model at
+    # this location) — retrying it just burns quota. Only transient classes
+    # (network/5xx/429) are worth a second attempt.
+    _failed_idx = [i for i, r in enumerate(results)
+                   if r.get("_batch_error") and r.get("status") != 404]
     if _failed_idx and len(_failed_idx) < len(batches):
         logger.info("Meteomatics: retrying %d/%d failed batches sequentially",
                     len(_failed_idx), len(batches))
@@ -1002,6 +1006,28 @@ def fetch_meteomatics_forecast(
     # If ANY batch failed, return a single error (no partial-success rendering).
     # The first batch failure is the most informative; subsequent failures are
     # often cascading downstream effects.
+    # ---- PARTIAL-PARAMETER TOLERANCE -------------------------------------
+    # A 404 from Meteomatics means "this parameter set isn't available for
+    # this model at this location" — the SERVICE IS HEALTHY. Meteomatics
+    # applies all-or-nothing semantics per request, so one unsupported
+    # parameter 404s its whole batch. Previously that killed the entire
+    # forecast and raised a false "Meteomatics unavailable" outage banner
+    # (observed at 27.7N 85.3E, where MIX doesn't serve the full 95-parameter
+    # set). We now drop only the unavailable batches and render the forecast
+    # from what IS served, provided the operational core survives.
+    _CORE_PARAMS = ("temperature_2m", "wind_speed_10m", "wind_direction_10m")
+    _dropped_params: list = []
+    _404_idx = [i for i, r in enumerate(results)
+                if r.get("_batch_error") and r.get("status") == 404]
+    if _404_idx and len(_404_idx) < len(batches):
+        for i in _404_idx:
+            _dropped_params.extend(batches[i])
+        results = [r for i, r in enumerate(results) if i not in _404_idx]
+        logger.info(
+            "Meteomatics: %d/%d batches unavailable at %.4f,%.4f (HTTP 404) — "
+            "rendering forecast without %d parameter(s)",
+            len(_404_idx), len(batches), lat, lon, len(_dropped_params))
+
     for r in results:
         if r.get("_batch_error"):
             msg = r.get("message") or "unknown error"
@@ -1017,6 +1043,10 @@ def fetch_meteomatics_forecast(
                        "Verify the subscription tier supports the requested data.")
             elif status == 429:
                 msg = "Meteomatics rate limited — too many requests per minute."
+            elif status == 404:
+                msg = ("Meteomatics does not serve the requested parameters for "
+                       f"model '{model_id}' at {lat:.3f},{lon:.3f}. This is a data "
+                       "coverage limit, not a service outage.")
             elif status and 500 <= status < 600:
                 msg = f"Meteomatics server error (HTTP {status}) — service may be degraded."
             logger.warning("Meteomatics batch failed after retry: %s", msg)
@@ -1065,6 +1095,21 @@ def fetch_meteomatics_forecast(
     translated["_model"] = model
     translated["_run_info"] = _extract_run_info(merged_payload)
     translated["_batches"] = {"count": len(batches), "elapsed_ms": elapsed_ms}
+    # Core-parameter guard: a partial render is only acceptable if the
+    # operational essentials survived. Otherwise fail honestly.
+    if _dropped_params:
+        _h = translated.get("hourly") or {}
+        _missing_core = [p for p in _CORE_PARAMS if not _h.get(p)]
+        if _missing_core:
+            return {
+                "error": True,
+                "message": ("Meteomatics did not return core parameters "
+                            f"({', '.join(_missing_core)}) for model '{model_id}' "
+                            f"at {lat:.3f},{lon:.3f} — data coverage limit."),
+                "status": 404,
+                "_provider": "meteomatics",
+            }
+        translated["_partial_params"] = sorted(set(_dropped_params))
     return translated
 
 
