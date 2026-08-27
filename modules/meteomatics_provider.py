@@ -877,11 +877,18 @@ def _fetch_one_batch(
     param_str = ",".join(mm_params)
     url = f"{METEOMATICS_BASE}/{validdate}/{param_str}/{lat:.4f},{lon:.4f}/json?model={model_id}"
     try:
+        # can_trip=False: a single batch must NEVER open the circuit while the
+        # other batches of the SAME forecast are still in flight. Previously
+        # one transient batch failure opened the breaker, and the remaining
+        # batches then fail-fast with MeteomaticsCircuitOpen — converting one
+        # hiccup into a guaranteed total forecast failure. The breaker is now
+        # armed once, at the forecast level, only if every retry has failed.
         return _mm_fetch_json(
             url,
             timeout=DEFAULT_TIMEOUT_S,
             retries=1,
             basic_auth=creds,
+            can_trip=False,
         )
     except MeteomaticsCircuitOpen as e:
         return {
@@ -965,12 +972,31 @@ def fetch_meteomatics_forecast(
     from concurrent.futures import ThreadPoolExecutor
 
     t0 = _time.time()
-    with ThreadPoolExecutor(max_workers=len(batches)) as executor:
+    # max_workers matches the concurrency gate — queueing 10 threads on a
+    # 3-permit semaphore just burns threads waiting.
+    with ThreadPoolExecutor(max_workers=min(len(batches), 3)) as executor:
         futures = [
             executor.submit(_fetch_one_batch, creds, validdate, lat, lon, model_id, batch)
             for batch in batches
         ]
         results = [f.result() for f in futures]
+
+    # SECOND PASS — retry only the batches that failed, sequentially, once.
+    # A 95-parameter forecast is 10 batches; at cold start (every deploy) the
+    # ensemble and scorecard fire simultaneously, so the chance that at least
+    # one batch hits a transient hiccup is high — and an all-or-nothing merge
+    # turned that single hiccup into "Meteomatics unavailable". This pass is
+    # purely additive: it can only convert a failure into a success.
+    _failed_idx = [i for i, r in enumerate(results) if r.get("_batch_error")]
+    if _failed_idx and len(_failed_idx) < len(batches):
+        logger.info("Meteomatics: retrying %d/%d failed batches sequentially",
+                    len(_failed_idx), len(batches))
+        for i in _failed_idx:
+            _time.sleep(0.35)
+            retry = _fetch_one_batch(creds, validdate, lat, lon, model_id,
+                                     batches[i])
+            if not retry.get("_batch_error"):
+                results[i] = retry
     elapsed_ms = int((_time.time() - t0) * 1000)
 
     # If ANY batch failed, return a single error (no partial-success rendering).
@@ -993,7 +1019,12 @@ def fetch_meteomatics_forecast(
                 msg = "Meteomatics rate limited — too many requests per minute."
             elif status and 500 <= status < 600:
                 msg = f"Meteomatics server error (HTTP {status}) — service may be degraded."
-            logger.warning("Meteomatics batch failed: %s", msg)
+            logger.warning("Meteomatics batch failed after retry: %s", msg)
+            # Forecast-level breaker arming: only for genuine unreachability
+            # (status None = network/timeout, or 5xx). A 4xx means the service
+            # answered and must not open the circuit.
+            if status is None or (isinstance(status, int) and 500 <= status < 600):
+                mm_record_failure()
             return {
                 "error": True,
                 "message": msg,
