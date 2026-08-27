@@ -69,7 +69,23 @@ def nearest_stations(lat: float, lon: float, n: int = 10) -> list:
     return out[:n]
 
 
-def beam_height_ft(dist_km: float, elev_deg: float = 0.5) -> float:
+# Maximum range at which a single NEXRAD/weather-radar site produces usable
+# data (N0Q product range is 230 km). Beyond this the 4/3-earth beam model is
+# physically meaningless — at 10,000 km it returns ~22 million feet.
+STATION_MAX_RANGE_KM = 250.0
+
+
+def station_in_range(dist_km: float) -> bool:
+    """True when a radar site is close enough to sample the site's airspace."""
+    return dist_km <= STATION_MAX_RANGE_KM
+
+
+def beam_height_ft(dist_km: float, elev_deg: float = 0.5):
+    """Beam centreline height (ft) via the 4/3-effective-earth model.
+    Returns None beyond STATION_MAX_RANGE_KM, where the model no longer
+    describes anything real (and the radar cannot see the site at all)."""
+    if dist_km is None or dist_km > STATION_MAX_RANGE_KM:
+        return None
     r_m = dist_km * 1000.0
     re_eff = (4.0 / 3.0) * 6.371e6
     return (r_m * math.sin(math.radians(elev_deg))
@@ -210,6 +226,14 @@ const satImg=document.getElementById('satimg');
 const satWrap=document.getElementById('satwrap');
 const satSite=document.getElementById('satsite');
 const satFrames=(CFG.starFrames||[]).map(f=>f.url);
+if(!satFrames.length){
+  // Explicit state beats a black rectangle: say WHY there is no imagery.
+  const _b=document.getElementById('m2');
+  if(_b)_b.innerHTML='<div style="display:flex;align-items:center;'+
+    'justify-content:center;height:100%;color:#6B7280;font-size:11px;'+
+    'text-align:center;padding:0 24px;line-height:1.6;">'+
+    (CFG.starLabel||'')+'<br>no geostationary imagery available for this longitude</div>';
+}
 satTs=(CFG.starFrames||[]).map(f=>f.ts);
 satFrames.forEach(u=>{const p=new Image();p.src=u;});   // preload
 // Zoom-match: scale the sector image about the site's position so the
